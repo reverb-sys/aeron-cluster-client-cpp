@@ -17,6 +17,23 @@ chmod +x scripts/*.sh
 ./scripts/build.sh
 ```
 
+#### 2.1 Pre-requisites
+
+In case aeron is not built and you may face this issue
+```
+CMake Error at CMakeLists.txt:95 (message):
+    Aeron client library not found. Please build Aeron first at
+    /home/ubuntu/aeron  
+```
+
+Use the Aeron setup / install script to setup Aeron
+
+```bash
+./scripts/install_aeron.sh
+```
+
+
+
 ### 3. Run Example
 ```bash
 # Make sure Aeron Media Driver is running first
