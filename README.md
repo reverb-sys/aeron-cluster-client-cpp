@@ -6,6 +6,9 @@ A professional C++ client library for Real Logic's Aeron Cluster with proper SBE
 
 This repository provides a complete C++ implementation for connecting to and interacting with Aeron Cluster. It includes proper SBE message encoding/decoding, session management, and order publishing capabilities.
 
+For Documentation on getting started follow instructions here [GETTING_STARTED](GETTING_STARTED.md)
+
+
 **Key Features:**
 - ✅ Full SBE protocol compliance matching Go/Java implementations
 - ✅ Session management with automatic leader detection
