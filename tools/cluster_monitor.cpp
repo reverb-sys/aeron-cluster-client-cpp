@@ -25,6 +25,7 @@ std::atomic<bool> running{true};
 void signalHandler(int signal) {
     std::cout << "\nReceived signal " << signal << ", shutting down..." << std::endl;
     running = false;
+    exit(0);
 }
 
 struct MemberStats {

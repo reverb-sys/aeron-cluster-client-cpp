@@ -87,7 +87,7 @@ struct ClusterClientConfig {
      * For specific network interfaces, use something like:
      * "aeron:udp?endpoint=192.168.1.100:44445"
      */
-    std::string response_channel = "aeron:udp?endpoint=localhost:0";
+    std::string response_channel = "aeron:udp?endpoint=10.37.47.181:45436";
 
     /**
      * @brief Aeron media driver directory

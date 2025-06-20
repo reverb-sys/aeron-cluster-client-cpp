@@ -18,14 +18,16 @@ std::vector<uint8_t> SBEEncoder::encodeSessionConnectRequest(
     const std::string& responseChannel,
     int32_t protocolVersion) {
     
+    std::vector<uint8_t> responseChannelBytes(responseChannel.begin(), responseChannel.end());
+
     // Calculate total message size
     size_t totalSize = sizeof(MessageHeader) + 
                       SessionConnectRequest::sbeBlockLength() + 
-                      4 + responseChannel.length(); // length prefix + channel data
+                      4 + responseChannelBytes.size(); // length prefix + channel data
     
     std::vector<uint8_t> buffer(totalSize);
     uint8_t* ptr = buffer.data();
-    
+
     // Encode SBE header
     MessageHeader header;
     header.blockLength = SessionConnectRequest::sbeBlockLength();
@@ -47,11 +49,11 @@ std::vector<uint8_t> SBEEncoder::encodeSessionConnectRequest(
     ptr += sizeof(int32_t);
     
     // Encode variable length response channel
-    uint32_t channelLength = static_cast<uint32_t>(responseChannel.length());
+    uint32_t channelLength = static_cast<uint32_t>(responseChannelBytes.size());
     std::memcpy(ptr, &channelLength, sizeof(uint32_t));
     ptr += sizeof(uint32_t);
     
-    std::memcpy(ptr, responseChannel.c_str(), responseChannel.length());
+    std::memcpy(ptr, responseChannelBytes.data(), responseChannelBytes.size());
     
     return buffer;
 }

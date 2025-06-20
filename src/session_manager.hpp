@@ -26,7 +26,7 @@ public:
                        const std::string& headers);
     
     void handleSessionEvent(const ParseResult& result);
-    
+    std::string resolveEgressEndpoint(const std::string& channel);
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;

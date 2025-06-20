@@ -7,6 +7,16 @@
 // Helper function implementations for string parsing
 #include <sstream>
 #include <iomanip>
+#include <fstream>
+
+#include <random>
+#include <regex>
+#include <stdexcept>
+#include <string>
+#include <set>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using namespace aeron_cluster;
 
@@ -34,6 +44,8 @@ void printUsage() {
     std::cout << "  --debug             Enable debug logging" << std::endl;
     std::cout << "  --orders COUNT      Number of test orders to send (default: 5)" << std::endl;
     std::cout << "  --interval MS       Interval between orders in milliseconds (default: 1000)" << std::endl;
+    std::cout << "  --timeout MS        Connection timeout in milliseconds (default: 10000)" << std::endl;
+    std::cout << "  --check-only        Only check cluster availability, don't send orders" << std::endl;
     std::cout << std::endl;
 }
 
@@ -54,6 +66,141 @@ std::vector<std::string> parseEndpoints(const std::string& endpointList) {
     return endpoints;
 }
 
+int getAvailablePortInRange(int minPort = 40000, int maxPort = 59000) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dist(minPort, maxPort);
+        std::set<int> tried;
+
+        while (tried.size() < (maxPort - minPort + 1)) {
+            int port = dist(gen);
+            if (tried.count(port)) continue;
+            tried.insert(port);
+
+            int sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock < 0) continue;
+
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = INADDR_ANY;
+            addr.sin_port = htons(port);
+
+            if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+                close(sock);
+                return port;  // port is available
+            }
+
+            close(sock);
+        }
+
+        throw std::runtime_error("No available UDP port found in the range");
+    }
+
+ std::string resolveEgressEndpoint(const std::string& channel) {
+        // Match hostnames (e.g., localhost), IPv4, and port numbers
+        std::regex pattern(R"(endpoint=([a-zA-Z0-9\.\-]+):(\d+))");
+        std::smatch match;
+
+        if (std::regex_search(channel, match, pattern)) {
+            std::string host = match[1].str();
+            std::string portStr = match[2].str();
+            int port = std::stoi(portStr);
+
+            if (port == 0) {
+                int newPort = getAvailablePortInRange();
+                std::string newEndpoint = "endpoint=" + host + ":" + std::to_string(newPort);
+                return std::regex_replace(channel, pattern, newEndpoint);
+            } else {
+                return channel;
+            }
+        } else {
+            throw std::invalid_argument("Channel endpoint is not in the correct format: expected 'endpoint=HOST:PORT'");
+        }
+    }
+
+// FIXED: Add pre-flight checks
+bool performPreflightChecks(const std::string& aeronDir, const std::vector<std::string>& endpoints) {
+    std::cout << "🔍 Performing pre-flight checks..." << std::endl;
+    
+    // Check 1: Aeron directory and Media Driver
+    std::string cncFile = aeronDir + "/cnc.dat";
+    std::ifstream file(cncFile);
+    bool aeronRunning = file.good();
+    file.close();
+    
+    if (!aeronRunning) {
+        std::cout << "❌ Aeron Media Driver not detected" << std::endl;
+        std::cout << "   Expected CnC file: " << cncFile << std::endl;
+        std::cout << "💡 To start Aeron Media Driver:" << std::endl;
+        std::cout << "   1. Download Aeron: https://github.com/real-logic/aeron/releases" << std::endl;
+        std::cout << "   2. Start Media Driver:" << std::endl;
+        std::cout << "      java -cp aeron-all-X.X.X.jar io.aeron.driver.MediaDriver" << std::endl;
+        std::cout << "   3. Or specify different directory with --aeron-dir" << std::endl;
+        return false;
+    }
+    std::cout << "✅ Aeron Media Driver detected at: " << aeronDir << std::endl;
+    
+    // Check 2: Warn about cluster requirements
+    std::cout << "⚠️  Cluster Requirements:" << std::endl;
+    std::cout << "   Make sure Aeron Cluster is running at these endpoints:" << std::endl;
+    for (const auto& endpoint : endpoints) {
+        std::cout << "   • " << endpoint << std::endl;
+    }
+    std::cout << std::endl;
+    std::cout << "💡 To start a test cluster:" << std::endl;
+    std::cout << "   java -cp aeron-all-X.X.X.jar io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService" << std::endl;
+    std::cout << std::endl;
+    
+    return true;
+}
+
+// FIXED: Add connection test with timeout
+bool testClusterConnectivity(const std::vector<std::string>& endpoints, 
+                            const std::string& aeronDir, 
+                            int timeoutMs, 
+                            bool debugMode) {
+    std::cout << "🔌 Testing cluster connectivity..." << std::endl;
+    
+    try {
+        // Create minimal configuration for connectivity test
+        auto config = ClusterClientConfigBuilder()
+            .withClusterEndpoints(endpoints)
+            .withAeronDir(aeronDir)
+            .withResponseTimeout(std::chrono::milliseconds(timeoutMs))
+            .withMaxRetries(1) // Only one retry for quick test
+            .build();
+        
+        config.debug_logging = debugMode;
+        config.enable_console_info = true;
+        config.enable_console_warnings = true;
+        config.enable_console_errors = true;
+        
+        // Create client and attempt connection
+        ClusterClient testClient(config);
+        
+        std::cout << "⏱️  Attempting connection (timeout: " << timeoutMs << "ms)..." << std::endl;
+        
+        bool connected = testClient.connect();
+        
+        if (connected) {
+            std::cout << "✅ Successfully connected to cluster!" << std::endl;
+            std::cout << "   Session ID: " << testClient.getSessionId() << std::endl;
+            std::cout << "   Leader Member: " << testClient.getLeaderMemberId() << std::endl;
+            
+            // Disconnect cleanly
+            testClient.disconnect();
+            return true;
+        } else {
+            std::cout << "❌ Failed to connect to cluster" << std::endl;
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cout << "❌ Connection test failed with exception: " << e.what() << std::endl;
+        return false;
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     std::vector<std::string> clusterEndpoints = {
@@ -61,8 +208,10 @@ int main(int argc, char* argv[]) {
     };
     std::string aeronDir = "/dev/shm/aeron";
     bool debugMode = false;
+    bool checkOnly = false;
     int orderCount = 5;
     int orderInterval = 1000; // milliseconds
+    int connectionTimeout = 10000; // milliseconds - FIXED: Add configurable timeout
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -76,10 +225,14 @@ int main(int argc, char* argv[]) {
             aeronDir = argv[++i];
         } else if (arg == "--debug") {
             debugMode = true;
+        } else if (arg == "--check-only") {
+            checkOnly = true;
         } else if (arg == "--orders" && i + 1 < argc) {
             orderCount = std::stoi(argv[++i]);
         } else if (arg == "--interval" && i + 1 < argc) {
             orderInterval = std::stoi(argv[++i]);
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            connectionTimeout = std::stoi(argv[++i]);
         } else {
             std::cerr << "Unknown option: " << arg << std::endl;
             printUsage();
@@ -93,32 +246,63 @@ int main(int argc, char* argv[]) {
     
     std::cout << "🚀 Starting Aeron Cluster C++ Client Example" << std::endl;
     std::cout << "=============================================" << std::endl;
+    std::cout << "📋 Configuration:" << std::endl;
+    std::cout << "   Cluster endpoints: ";
+    for (size_t i = 0; i < clusterEndpoints.size(); ++i) {
+        std::cout << clusterEndpoints[i];
+        if (i < clusterEndpoints.size() - 1) std::cout << ", ";
+    }
+    std::cout << std::endl;
+    std::cout << "   Aeron directory: " << aeronDir << std::endl;
+    std::cout << "   Debug mode: " << (debugMode ? "enabled" : "disabled") << std::endl;
+    std::cout << "   Connection timeout: " << connectionTimeout << "ms" << std::endl;
+    if (!checkOnly) {
+        std::cout << "   Orders to send: " << orderCount << std::endl;
+        std::cout << "   Order interval: " << orderInterval << "ms" << std::endl;
+    }
+    std::cout << std::endl;
     
     try {
-        // Create client configuration
+        // FIXED: Perform pre-flight checks first
+        if (!performPreflightChecks(aeronDir, clusterEndpoints)) {
+            return 1;
+        }
+        
+        // FIXED: Test connectivity first
+        if (!testClusterConnectivity(clusterEndpoints, aeronDir, connectionTimeout, debugMode)) {
+            std::cout << std::endl;
+            std::cout << "🔧 Troubleshooting Steps:" << std::endl;
+            std::cout << "1. Verify Aeron Cluster is running:" << std::endl;
+            std::cout << "   java -cp aeron-all-X.X.X.jar io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService" << std::endl;
+            std::cout << "2. Check network connectivity:" << std::endl;
+            std::cout << "   netstat -tlnp | grep -E \"(9002|9102|9202)\"" << std::endl;
+            std::cout << "3. Verify firewall allows UDP traffic on cluster ports" << std::endl;
+            std::cout << "4. Check Aeron Media Driver is running and accessible" << std::endl;
+            std::cout << "5. Try with --debug flag for more detailed information" << std::endl;
+            return 1;
+        }
+        
+        // If check-only mode, exit successfully after connectivity test
+        if (checkOnly) {
+            std::cout << "🎉 Cluster connectivity check completed successfully!" << std::endl;
+            return 0;
+        }
+        
+        // Create client configuration with proper timeout
         auto config = ClusterClientConfigBuilder()
             .withClusterEndpoints(clusterEndpoints)
             .withAeronDir(aeronDir)
-            .withResponseTimeout(std::chrono::seconds(10))
+            .withResponseTimeout(std::chrono::milliseconds(connectionTimeout))
             .withMaxRetries(3)
             .build();
         
         // Enable debug mode if requested
         config.debug_logging = debugMode;
         config.enable_console_info = true;
-        
-        std::cout << "📋 Configuration:" << std::endl;
-        std::cout << "   Cluster endpoints: ";
-        for (size_t i = 0; i < clusterEndpoints.size(); ++i) {
-            std::cout << clusterEndpoints[i];
-            if (i < clusterEndpoints.size() - 1) std::cout << ", ";
-        }
-        std::cout << std::endl;
-        std::cout << "   Aeron directory: " << aeronDir << std::endl;
-        std::cout << "   Debug mode: " << (debugMode ? "enabled" : "disabled") << std::endl;
-        std::cout << "   Orders to send: " << orderCount << std::endl;
-        std::cout << "   Order interval: " << orderInterval << "ms" << std::endl;
-        std::cout << std::endl;
+        config.enable_console_warnings = true;
+        config.enable_console_errors = true;
+        // config.response_channel = "aeron:udp?endpoint=10.37.47.181:0"; // Default response channel
+        config.response_channel = resolveEgressEndpoint("aeron:udp?endpoint=10.37.47.181:0");
         
         // Create the client
         ClusterClient client(config);
@@ -150,14 +334,11 @@ int main(int argc, char* argv[]) {
             }
         });
         
-        // Connect to the cluster
-        std::cout << "🔌 Connecting to Aeron Cluster..." << std::endl;
+        // Connect to the cluster (we know it works from connectivity test)
+        std::cout << "🔌 Connecting to Aeron Cluster for order processing..." << std::endl;
         
         if (!client.connect()) {
-            std::cerr << "❌ Failed to connect to cluster. Please ensure:" << std::endl;
-            std::cerr << "   • Aeron Media Driver is running" << std::endl;
-            std::cerr << "   • Cluster nodes are accessible at specified endpoints" << std::endl;
-            std::cerr << "   • Aeron directory (" << aeronDir << ") exists and is writable" << std::endl;
+            std::cerr << "❌ Failed to connect to cluster for order processing" << std::endl;
             return 1;
         }
         
@@ -202,6 +383,7 @@ int main(int argc, char* argv[]) {
                 
             } catch (const std::exception& e) {
                 std::cerr << "❌ Failed to publish order " << (i + 1) << ": " << e.what() << std::endl;
+                failedOrders++;
             }
         }
         
@@ -310,6 +492,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "• Ensure proper permissions for Aeron directory" << std::endl;
         std::cerr << "• Check firewall settings for UDP traffic" << std::endl;
         std::cerr << "• Verify JsonCpp library is properly installed" << std::endl;
+        std::cerr << "• Try running with --check-only flag first" << std::endl;
+        std::cerr << "• Use --debug flag for more detailed error information" << std::endl;
         return 1;
     }
 }

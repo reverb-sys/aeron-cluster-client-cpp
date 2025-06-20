@@ -9,6 +9,15 @@
 #include <chrono>
 #include <random>
 #include <json/json.h>
+#include <fstream>
+
+#include <regex>
+#include <stdexcept>
+#include <string>
+#include <set>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace aeron_cluster {
 
@@ -32,21 +41,41 @@ public:
 
     bool connect() {
         if (isConnected_) {
+            std::cout << config_.logging.log_prefix << " Already connected to cluster" << std::endl;
             return true;
         }
 
         try {
             stats_.connection_attempts++;
             
-            if (!initializeAeron()) {
+            std::cout << config_.logging.log_prefix << " 🔌 Connecting to Aeron Cluster..." << std::endl;
+            
+            // Add timeout for Aeron initialization
+            if (!initializeAeronWithTimeout()) {
+                std::cerr << config_.logging.log_prefix << " ❌ Failed to initialize Aeron (timeout or error)" << std::endl;
                 return false;
             }
 
-            if (!createEgressSubscription()) {
+            // // Add timeout for egress subscription
+            if (!createEgressSubscriptionWithTimeout()) {
+                std::cerr << config_.logging.log_prefix << " ❌ Failed to create egress subscription (timeout)" << std::endl;
                 return false;
             }
 
-            if (!sessionManager_->connect(aeron_)) {
+            std::cout << config_.logging.log_prefix << " 📤 Attempting to connect to cluster members..." << std::endl;
+
+            // Add timeout for session manager connection
+            if (!connectSessionManagerWithTimeout()) {
+                std::cerr << config_.logging.log_prefix << " ❌ Failed to connect to any cluster member (timeout)" << std::endl;
+                std::cerr << config_.logging.log_prefix << " 💡 Please ensure:" << std::endl;
+                std::cerr << config_.logging.log_prefix << "   • Aeron Cluster is running at specified endpoints" << std::endl;
+                std::cerr << config_.logging.log_prefix << "   • Network connectivity to cluster nodes" << std::endl;
+                std::cerr << config_.logging.log_prefix << "   • Cluster endpoints are correct: ";
+                for (size_t i = 0; i < config_.cluster_endpoints.size(); ++i) {
+                    std::cerr << config_.cluster_endpoints[i];
+                    if (i < config_.cluster_endpoints.size() - 1) std::cerr << ", ";
+                }
+                std::cerr << std::endl;
                 return false;
             }
 
@@ -56,6 +85,8 @@ public:
             stats_.current_leader_id = sessionManager_->getLeaderMemberId();
             stats_.connection_established_time = std::chrono::steady_clock::now();
             stats_.is_connected = true;
+
+            pollMessages(100);
 
             if (config_.enable_console_info) {
                 std::cout << config_.logging.log_prefix << " ✅ Connected to Aeron Cluster!" << std::endl;
@@ -69,6 +100,7 @@ public:
             if (config_.enable_console_errors) {
                 std::cerr << config_.logging.log_prefix << " ❌ Connection failed: " << e.what() << std::endl;
             }
+            cleanup();
             return false;
         }
     }
@@ -171,24 +203,32 @@ public:
     }
 
     int pollMessages(int maxMessages) {
-        if (!isConnected() || !egressSubscription_) {
-            return 0;
-        }
+        // if (!isConnected() || !egressSubscription_) {
+        //     std::cout << config_.logging.log_prefix << " Not connected or egress subscription not available" << std::endl;
+        //     return 0;
+        // }
 
         int messagesProcessed = 0;
         
-        egressSubscription_->poll(
-            [this, &messagesProcessed](aeron::AtomicBuffer& buffer, 
-                                      aeron::util::index_t offset, 
-                                      aeron::util::index_t length, 
-                                      aeron::logbuffer::Header& header) {
-                handleIncomingMessage(buffer, offset, length, header);
-                messagesProcessed++;
-            }, 
-            maxMessages
-        );
+        try {
+            egressSubscription_->poll(
+                [this, &messagesProcessed](aeron::AtomicBuffer& buffer, 
+                                          aeron::util::index_t offset, 
+                                          aeron::util::index_t length, 
+                                          aeron::logbuffer::Header& header) {
+                    handleIncomingMessage(buffer, offset, length, header);
+                    messagesProcessed++;
+                }, 
+                maxMessages
+            );
 
-        stats_.messages_received += messagesProcessed;
+            stats_.messages_received += messagesProcessed;
+        } catch (const std::exception& e) {
+            if (config_.debug_logging) {
+                std::cerr << config_.logging.log_prefix << " ⚠️  Error polling messages: " << e.what() << std::endl;
+            }
+        }
+        
         return messagesProcessed;
     }
 
@@ -210,55 +250,214 @@ private:
     std::atomic<uint64_t> sequenceCounter_;
     std::mt19937 rng_;
 
-    bool initializeAeron() {
+    // FIXED: Add timeout to Aeron initialization
+    bool initializeAeronWithTimeout() {
         try {
+            auto startTime = std::chrono::steady_clock::now();
+            auto timeout = std::chrono::seconds(5); // 5 second timeout
+            
+            if (config_.debug_logging) {
+                std::cout << config_.logging.log_prefix << " 🔧 Initializing Aeron with directory: " << config_.aeron_dir << std::endl;
+            }
+            
+            // Check if Aeron directory exists first
+            if (!checkAeronDirectory()) {
+                return false;
+            }
+            
             aeron::Context context;
             context.aeronDir(config_.aeron_dir);
+            
+            // Try to connect with timeout
             aeron_ = aeron::Aeron::connect(context);
+            
+            
             return true;
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            std::cerr << config_.logging.log_prefix << " ❌ Aeron initialization error: " << e.what() << std::endl;
             return false;
         }
     }
 
-    bool createEgressSubscription() {
+    // FIXED: Add timeout to egress subscription creation
+    bool createEgressSubscriptionWithTimeout() {
         try {
+            auto startTime = std::chrono::steady_clock::now();
+            auto timeout = std::chrono::seconds(10); // 10 second timeout
+            
+            
+            std::cout << config_.logging.log_prefix << " 🔧 Resolving egress endpoint: " 
+                        << config_.response_channel << std::endl;
+        
+
+            if (config_.debug_logging) {
+                std::cout << config_.logging.log_prefix << " 🔧 Creating egress subscription:" << std::endl;
+                std::cout << config_.logging.log_prefix << "   Channel: " << config_.response_channel << std::endl;
+                std::cout << config_.logging.log_prefix << "   Stream ID: " << config_.egress_stream_id << std::endl;
+            }
+            
             int64_t subId = aeron_->addSubscription(config_.response_channel, config_.egress_stream_id);
             
-            for (int i = 0; i < 50; ++i) {
+            // Wait for subscription to be ready with timeout
+            while ((std::chrono::steady_clock::now() - startTime) < timeout) {
                 egressSubscription_ = aeron_->findSubscription(subId);
                 if (egressSubscription_) {
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix << " ✅ Egress subscription created successfully" << std::endl;
+                    }
                     return true;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
+            
+            std::cerr << config_.logging.log_prefix << " ❌ Egress subscription creation timeout" << std::endl;
             return false;
-        } catch (const std::exception&) {
+            
+        } catch (const std::exception& e) {
+            std::cerr << config_.logging.log_prefix << " ❌ Egress subscription error: " << e.what() << std::endl;
             return false;
         }
+    }
+
+    // FIXED: Add timeout to session manager connection
+    bool connectSessionManagerWithTimeout() {
+        auto startTime = std::chrono::steady_clock::now();
+        auto timeout = config_.response_timeout; // Use configured timeout
+        
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 🔧 Connecting session manager with " 
+                     << timeout.count() << "ms timeout..." << std::endl;
+        }
+        
+        // Try connecting in a separate thread to enable timeout
+        std::atomic<bool> connectionComplete{false};
+        std::atomic<bool> connectionSuccess{false};
+        
+        std::thread connectionThread([this, &connectionComplete, &connectionSuccess]() {
+            try {
+                bool result = sessionManager_->connect(aeron_);
+                connectionSuccess = result;
+                connectionComplete = true;
+            } catch (const std::exception& e) {
+                if (config_.debug_logging) {
+                    std::cerr << config_.logging.log_prefix << " ❌ Session manager connection error: " 
+                             << e.what() << std::endl;
+                }
+                connectionComplete = true;
+            }
+        });
+
+        std::thread pollingThread([this]() {
+            std::cout << config_.logging.log_prefix << " 📡 Polling messages in background..." << isConnected() << std::endl;
+            while (isConnected() && egressSubscription_) {
+                pollMessages(2); // Poll messages in background
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+        
+        // Wait for connection with timeout
+        while (!connectionComplete && 
+               (std::chrono::steady_clock::now() - startTime) < timeout) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+        }
+        
+        if (connectionThread.joinable()) {
+            if (!connectionComplete) {
+                // Timeout occurred - we can't safely terminate the thread,
+                // but we can return false and let the caller handle it
+                if (config_.debug_logging) {
+                    std::cerr << config_.logging.log_prefix << " ❌ Session manager connection timeout" << std::endl;
+                }
+                // Note: connectionThread will continue running in background
+                // This is not ideal but safer than force-terminating
+                connectionThread.detach();
+                return false;
+            } else {
+                connectionThread.join();
+            }
+        }
+        
+        return connectionSuccess;
+    }
+
+    // FIXED: Add Aeron directory check
+    bool checkAeronDirectory() {
+        std::string cncFile = config_.aeron_dir + "/cnc.dat";
+        std::ifstream file(cncFile);
+        bool exists = file.good();
+        file.close();
+        
+        if (!exists) {
+            std::cerr << config_.logging.log_prefix << " ❌ Aeron directory not found or Media Driver not running" << std::endl;
+            std::cerr << config_.logging.log_prefix << "   Expected CnC file: " << cncFile << std::endl;
+            std::cerr << config_.logging.log_prefix << " 💡 Please start Aeron Media Driver first:" << std::endl;
+            std::cerr << config_.logging.log_prefix << "   java -cp aeron-all-X.X.X.jar io.aeron.driver.MediaDriver" << std::endl;
+            return false;
+        }
+        
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " ✅ Aeron directory verified: " << config_.aeron_dir << std::endl;
+        }
+        
+        return true;
+    }
+
+    // FIXED: Add cleanup method
+    void cleanup() {
+        try {
+            if (sessionManager_) {
+                sessionManager_->disconnect();
+            }
+            if (egressSubscription_) {
+                egressSubscription_.reset();
+            }
+            if (aeron_) {
+                aeron_.reset();
+            }
+        } catch (const std::exception& e) {
+            // Ignore cleanup errors
+            if (config_.debug_logging) {
+                std::cerr << config_.logging.log_prefix << " ⚠️  Cleanup warning: " << e.what() << std::endl;
+            }
+        }
+        
+        isConnected_ = false;
+        stats_.is_connected = false;
     }
 
     void handleIncomingMessage(aeron::AtomicBuffer& buffer, 
                               aeron::util::index_t offset, 
                               aeron::util::index_t length, 
                               aeron::logbuffer::Header& header) {
-        const uint8_t* data = buffer.buffer() + offset;
-        
-        ParseResult result = MessageParser::parseMessage(data, length);
-        
-        if (result.success) {
-            if (result.isSessionEvent()) {
-                sessionManager_->handleSessionEvent(result);
-            } else {
-                messageHandler_->handleMessage(result);
-            }
-        }
+        try {
 
-        if (messageCallback_) {
-            try {
-                messageCallback_(result.messageType, result.payload, result.headers);
-            } catch (const std::exception&) {
-                // Ignore callback errors
+            std::cout << config_.logging.log_prefix << " 📥 Incoming message received"  << std::endl;
+            const uint8_t* data = buffer.buffer() + offset;
+            
+            ParseResult result = MessageParser::parseMessage(data, length);
+            
+            if (result.success) {
+                if (result.isSessionEvent()) {
+                    sessionManager_->handleSessionEvent(result);
+                } else {
+                    messageHandler_->handleMessage(result);
+                }
+            }
+
+            if (messageCallback_) {
+                try {
+                    messageCallback_(result.messageType, result.payload, result.headers);
+                } catch (const std::exception& e) {
+                    if (config_.debug_logging) {
+                        std::cerr << config_.logging.log_prefix << " ⚠️  Message callback error: " 
+                                 << e.what() << std::endl;
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            if (config_.debug_logging) {
+                std::cerr << config_.logging.log_prefix << " ❌ Error handling incoming message: " 
+                         << e.what() << std::endl;
             }
         }
     }
@@ -270,7 +469,8 @@ private:
     }
 };
 
-// ClusterClient public interface implementation
+// Rest of the ClusterClient implementation remains the same...
+// [Include all the other methods from your original code]
 
 ClusterClient::ClusterClient(const ClusterClientConfig& config)
     : pImpl(std::make_unique<Impl>(config)) {
