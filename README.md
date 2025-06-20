@@ -322,8 +322,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/aeron-cluster-cpp/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/aeron-cluster-cpp/discussions)
+- **Issues**: [GitHub Issues](https://github.com/reverb-sys/aeron-cluster-client-cpp/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/reverb-sys/aeron-cluster-client-cpp/discussions)
 - **Documentation**: [docs/](docs/)
 
 ---
