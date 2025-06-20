@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.16)
-
 project(aeron-cluster-cpp
     VERSION 1.0.0
     DESCRIPTION "C++ client library for Aeron Cluster with SBE support"
@@ -18,31 +17,114 @@ option(BUILD_TOOLS "Build utility tools" ON)
 option(ENABLE_WARNINGS "Enable compiler warnings" ON)
 option(ENABLE_WERROR "Treat warnings as errors" OFF)
 
-# Include CMake modules
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+# Set Aeron root directory (separate from our client code)
+set(AERON_ROOT /home/ubuntu/aeron)
 
-# Include compiler warnings setup
-if(ENABLE_WARNINGS)
-    include(cmake/CompilerWarnings.cmake)
-endif()
-
-# Find dependencies
+# Find required packages
+find_package(Threads REQUIRED)  # <-- THIS WAS MISSING!
 find_package(PkgConfig REQUIRED)
 
-# Find Aeron
-find_package(Aeron REQUIRED)
-if(NOT Aeron_FOUND)
-    message(FATAL_ERROR "Aeron library not found. Please install Aeron C++ library.")
+# Find jsoncpp
+pkg_check_modules(JSONCPP jsoncpp)
+
+# If pkg-config doesn't find it, try manual search
+if(NOT JSONCPP_FOUND)
+    find_path(JSONCPP_INCLUDE_DIRS json/json.h
+        PATHS
+            /usr/include/jsoncpp
+            /usr/local/include/jsoncpp
+            /usr/include
+            /usr/local/include
+    )
+    
+    find_library(JSONCPP_LIBRARIES
+        NAMES jsoncpp
+        PATHS
+            /usr/lib
+            /usr/local/lib
+            /usr/lib/x86_64-linux-gnu
+    )
+    
+    if(JSONCPP_INCLUDE_DIRS AND JSONCPP_LIBRARIES)
+        set(JSONCPP_FOUND TRUE)
+        message(STATUS "Found jsoncpp manually: ${JSONCPP_LIBRARIES}")
+    else()
+        message(FATAL_ERROR "jsoncpp not found. Install with: sudo apt-get install libjsoncpp-dev")
+    endif()
+else()
+    message(STATUS "Found jsoncpp via pkg-config: ${JSONCPP_LIBRARIES}")
 endif()
 
-# Find JsonCpp
-pkg_check_modules(JSONCPP REQUIRED jsoncpp)
+# Find Aeron C++ include directories - check multiple possible locations
+set(AERON_CLUSTER_INCLUDE_DIR
+    ${AERON_ROOT}/aeron-client/src/main/cpp
+    ${AERON_ROOT}/aeron-client/src/main/c
+    ${AERON_ROOT}/aeron-driver/src/main/c
+)
 
-# Find Threads
-find_package(Threads REQUIRED)
+# Also check if headers are in the install location
+if(EXISTS "${AERON_ROOT}/cppbuild/Release/include/aeron")
+    list(APPEND AERON_CLUSTER_INCLUDE_DIR ${AERON_ROOT}/cppbuild/Release/include)
+endif()
 
-# Set up include directories
-set(AERON_CLUSTER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(EXISTS "${AERON_ROOT}/cppbuild/Debug/include/aeron")
+    list(APPEND AERON_CLUSTER_INCLUDE_DIR ${AERON_ROOT}/cppbuild/Debug/include)
+endif()
+
+# Find Aeron libraries (look in build directory first, then cppbuild)
+find_library(AERON_CLIENT_LIBRARY
+    NAMES aeron_client aeron
+    PATHS
+        ${AERON_ROOT}/build/lib
+        ${AERON_ROOT}/cppbuild/Release/lib
+        ${AERON_ROOT}/cppbuild/Debug/lib
+    NO_DEFAULT_PATH
+)
+
+find_library(AERON_DRIVER_LIBRARY
+    NAMES aeron_driver
+    PATHS
+        ${AERON_ROOT}/build/lib
+        ${AERON_ROOT}/cppbuild/Release/lib
+        ${AERON_ROOT}/cppbuild/Debug/lib
+    NO_DEFAULT_PATH
+)
+
+# Check if we found the libraries
+if(NOT AERON_CLIENT_LIBRARY)
+    message(FATAL_ERROR "Aeron client library not found. Please build Aeron first at ${AERON_ROOT}")
+endif()
+
+message(STATUS "Found Aeron client library: ${AERON_CLIENT_LIBRARY}")
+if(AERON_DRIVER_LIBRARY)
+    message(STATUS "Found Aeron driver library: ${AERON_DRIVER_LIBRARY}")
+endif()
+
+# Debug: Print all include directories we're checking
+foreach(dir ${AERON_CLUSTER_INCLUDE_DIR})
+    if(EXISTS ${dir})
+        message(STATUS "Found include directory: ${dir}")
+        if(EXISTS "${dir}/aeron")
+            message(STATUS "  - Contains aeron subdirectory")
+        endif()
+        if(EXISTS "${dir}/Aeron.h")
+            message(STATUS "  - Contains Aeron.h directly")
+        endif()
+    else()
+        message(STATUS "Include directory does not exist: ${dir}")
+    endif()
+endforeach()
+
+# Include directories (updated to include jsoncpp)
+include_directories(${AERON_CLUSTER_INCLUDE_DIR})
+include_directories(${JSONCPP_INCLUDE_DIRS})
+
+# Create aeron target for linking (since we're not using find_package)
+add_library(aeron STATIC IMPORTED)
+set_target_properties(aeron PROPERTIES
+    IMPORTED_LOCATION ${AERON_CLIENT_LIBRARY}
+    INTERFACE_INCLUDE_DIRECTORIES "${AERON_CLUSTER_INCLUDE_DIR}"
+)
 
 # Create main library
 add_library(aeron-cluster-cpp STATIC
@@ -50,15 +132,18 @@ add_library(aeron-cluster-cpp STATIC
     src/sbe_encoder.cpp
     src/session_manager.cpp
     src/message_handlers.cpp
+    src/order_types.cpp  # <-- Added this missing file
 )
 
 # Set target properties
 target_include_directories(aeron-cluster-cpp
     PUBLIC
-        $<BUILD_INTERFACE:${AERON_CLUSTER_INCLUDE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${AERON_CLUSTER_INCLUDE_DIR}
+        ${JSONCPP_INCLUDE_DIRS}
 )
 
 # Link libraries
@@ -75,11 +160,6 @@ target_compile_definitions(aeron-cluster-cpp
     PRIVATE
         AERON_CLUSTER_VERSION="${PROJECT_VERSION}"
 )
-
-# Apply compiler warnings
-if(ENABLE_WARNINGS)
-    set_target_warnings(aeron-cluster-cpp)
-endif()
 
 # Compiler-specific options
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -130,65 +210,6 @@ install(DIRECTORY include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.hpp"
 )
-
-# Install CMake config
-install(EXPORT aeron-cluster-cpp-targets
-    FILE aeron-cluster-cpp-targets.cmake
-    NAMESPACE aeron-cluster-cpp::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/aeron-cluster-cpp
-)
-
-# Create config file
-include(CMakePackageConfigHelpers)
-
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/aeron-cluster-cpp-config.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/aeron-cluster-cpp-config.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/aeron-cluster-cpp
-)
-
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/aeron-cluster-cpp-config-version.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
-
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/aeron-cluster-cpp-config.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/aeron-cluster-cpp-config-version.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/aeron-cluster-cpp
-)
-
-# Package configuration
-set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
-set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
-set(CPACK_PACKAGE_VENDOR "Aeron Cluster C++ Contributors")
-set(CPACK_PACKAGE_CONTACT "maintainer@example.com")
-set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
-
-# Platform-specific packaging
-if(WIN32)
-    set(CPACK_GENERATOR "ZIP;NSIS")
-    set(CPACK_NSIS_MODIFY_PATH ON)
-elseif(APPLE)
-    set(CPACK_GENERATOR "TGZ;productbuild")
-else()
-    set(CPACK_GENERATOR "TGZ;DEB;RPM")
-    
-    # DEB package settings
-    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Aeron Cluster C++ Contributors")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libaeron-dev, libjsoncpp-dev")
-    set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
-    
-    # RPM package settings
-    set(CPACK_RPM_PACKAGE_GROUP "Development/Libraries")
-    set(CPACK_RPM_PACKAGE_REQUIRES "aeron-devel, jsoncpp-devel")
-    set(CPACK_RPM_PACKAGE_LICENSE "MIT")
-endif()
-
-include(CPack)
 
 # Print build configuration
 message(STATUS "")

@@ -1,4 +1,5 @@
 #include "aeron_cluster/sbe_messages.hpp"
+#include "aeron_cluster/config.hpp"
 #include <chrono>
 #include <cstring>
 #include <iostream>

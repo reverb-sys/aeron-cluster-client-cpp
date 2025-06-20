@@ -6,6 +6,60 @@
 
 namespace aeron_cluster {
 
+// /**
+//  * @brief Logging configuration for the client
+//  */
+// struct LoggingConfig {
+//     std::string log_prefix = "[AeronCluster]";
+//     bool include_timestamps = true;
+//     bool include_thread_ids = false;
+// };
+
+/**
+ * @brief Logging configuration for the client
+ */
+struct LoggingConfig {
+    /**
+     * @brief Enable console output for informational messages
+     */
+    bool enable_console_info = true;
+
+    /**
+     * @brief Enable console output for warning messages
+     */
+    bool enable_console_warnings = true;
+
+    /**
+     * @brief Enable console output for error messages
+     */
+    bool enable_console_errors = true;
+
+    /**
+     * @brief Enable detailed protocol debugging output
+     */
+    bool enable_protocol_debug = false;
+
+    /**
+     * @brief Enable hex dump output for all messages
+     */
+    bool enable_hex_dumps = false;
+
+    /**
+     * @brief Log message prefix for identification
+     */
+    std::string log_prefix = "[AeronCluster]";
+
+    /**
+     * @brief Whether to include timestamps in log messages
+     */
+    bool include_timestamps = true;
+
+    /**
+     * @brief Whether to include thread IDs in log messages
+     */
+    bool include_thread_ids = false;
+};
+
 /**
  * @brief Configuration parameters for ClusterClient
  */
@@ -125,6 +179,13 @@ struct ClusterClientConfig {
      * Must match the topic expected by your cluster application.
      */
     std::string default_topic = "orders";
+
+    // Logging configuration
+    LoggingConfig logging;
+    bool enable_console_info = true;
+    bool enable_console_warnings = true;
+    bool enable_console_errors = true;
+    bool enable_hex_dumps = false;
 };
 
 /**
@@ -228,49 +289,6 @@ struct SBEConstants {
     static constexpr int32_t SESSION_EVENT_CLOSED = 4;
 };
 
-/**
- * @brief Logging configuration for the client
- */
-struct LoggingConfig {
-    /**
-     * @brief Enable console output for informational messages
-     */
-    bool enable_console_info = true;
 
-    /**
-     * @brief Enable console output for warning messages
-     */
-    bool enable_console_warnings = true;
-
-    /**
-     * @brief Enable console output for error messages
-     */
-    bool enable_console_errors = true;
-
-    /**
-     * @brief Enable detailed protocol debugging output
-     */
-    bool enable_protocol_debug = false;
-
-    /**
-     * @brief Enable hex dump output for all messages
-     */
-    bool enable_hex_dumps = false;
-
-    /**
-     * @brief Log message prefix for identification
-     */
-    std::string log_prefix = "[AeronCluster]";
-
-    /**
-     * @brief Whether to include timestamps in log messages
-     */
-    bool include_timestamps = true;
-
-    /**
-     * @brief Whether to include thread IDs in log messages
-     */
-    bool include_thread_ids = false;
-};
 
 } // namespace aeron_cluster

@@ -435,6 +435,7 @@ int main(int argc, char* argv[]) {
         int totalAttempts = 0;
         int totalSuccesses = 0;
         int onlineMembers = 0;
+        int currentLeader = clusterStats.currentLeader;
         
         for (const auto& pair : clusterStats.members) {
             const MemberStats& member = pair.second;

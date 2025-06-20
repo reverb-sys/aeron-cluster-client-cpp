@@ -10,9 +10,9 @@ target_link_libraries(message_inspector
         aeron-cluster-cpp
 )
 
-if(ENABLE_WARNINGS)
-    set_target_warnings(message_inspector)
-endif()
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(message_inspector)
+#endif()
 
 # Cluster monitor tool
 add_executable(cluster_monitor
@@ -24,9 +24,9 @@ target_link_libraries(cluster_monitor
         aeron-cluster-cpp
 )
 
-if(ENABLE_WARNINGS)
-    set_target_warnings(cluster_monitor)
-endif()
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(cluster_monitor)
+#endif()
 
 # Install tools
 install(TARGETS 

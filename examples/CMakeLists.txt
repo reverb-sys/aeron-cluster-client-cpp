@@ -10,9 +10,9 @@ target_link_libraries(basic_client_example
         aeron-cluster-cpp
 )
 
-if(ENABLE_WARNINGS)
-    set_target_warnings(basic_client_example)
-endif()
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(basic_client_example)
+#endif()
 
 # Order publishing example
 add_executable(order_publishing_example
@@ -24,9 +24,9 @@ target_link_libraries(order_publishing_example
         aeron-cluster-cpp
 )
 
-if(ENABLE_WARNINGS)
-    set_target_warnings(order_publishing_example)
-endif()
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(order_publishing_example)
+#endif()
 
 # Advanced features example
 add_executable(advanced_features_example
@@ -38,9 +38,9 @@ target_link_libraries(advanced_features_example
         aeron-cluster-cpp
 )
 
-if(ENABLE_WARNINGS)
-    set_target_warnings(advanced_features_example)
-endif()
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(advanced_features_example)
+#endif()
 
 # Install examples
 install(TARGETS 

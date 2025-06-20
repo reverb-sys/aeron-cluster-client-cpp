@@ -4,11 +4,11 @@
 
 namespace aeron_cluster {
 
-class ClusterClient;
+class ClusterClientImpl;
 
 class MessageHandler {
 public:
-    explicit MessageHandler(ClusterClient::Impl& client);
+    explicit MessageHandler();
     ~MessageHandler();
     
     void handleMessage(const ParseResult& result);
