@@ -15,8 +15,7 @@ For Documentation on getting started follow instructions here [GETTING_STARTED](
 - ✅ Order publishing with JSON payload support
 - ✅ Comprehensive message acknowledgment handling
 - ✅ Modular, extensible architecture
-- ✅ Professional CMake build system
-- ✅ Extensive documentation and examples
+- ✅ CMake build system
 
 ## Quick Start
 
