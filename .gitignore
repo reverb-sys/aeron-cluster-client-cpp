@@ -1,0 +1,112 @@
+# Build directories
+build*/
+_build/
+out/
+cmake-build-*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled object files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+!cmake/*.cmake
+
+# Package files
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+*.dmg
+
+# Testing
+Testing/
+CTestTestfile.cmake
+
+# Coverage reports
+*.gcov
+*.gcda
+*.gcno
+coverage/
+*.info
+
+# Valgrind
+*.valgrind
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Documentation generated files
+doc/html/
+doc/latex/
+docs/html/
+docs/latex/
+
+# Aeron specific
+/dev/shm/aeron*
+*.logbuffer
+
+# IDE specific
+*.cbp
+*.layout
+*.depend
+*.workspace
+
+# Qt Creator
+CMakeLists.txt.user
+CMakeLists.txt.user.*
+
+# Visual Studio
+*.vcproj
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+
+# Code::Blocks
+*.cbp
+*.layout
+*.depend
+
+# Local configuration
+local_config.hpp
+local_config.h
+.env
+.env.local
+
+# Profiling
+*.prof
+perf.data*
