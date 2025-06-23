@@ -30,12 +30,14 @@ public:
         , sequenceCounter_(0)
         , rng_(std::random_device{}())
     {
+        std::cout << config_.logging.log_prefix << " Initializing ClusterClient..." << std::endl;
         if (config_.debug_logging) {
             std::cout << config_.logging.log_prefix << " Creating ClusterClient" << std::endl;
         }
     }
 
     ~Impl() {
+        stopKeepaliveSystem();
         disconnect();
     }
 
@@ -49,7 +51,7 @@ public:
             stats_.connection_attempts++;
             
             std::cout << config_.logging.log_prefix << " 🔌 Connecting to Aeron Cluster..." << std::endl;
-            
+
             // Add timeout for Aeron initialization
             if (!initializeAeronWithTimeout()) {
                 std::cerr << config_.logging.log_prefix << " ❌ Failed to initialize Aeron (timeout or error)" << std::endl;
@@ -60,6 +62,10 @@ public:
             if (!createEgressSubscriptionWithTimeout()) {
                 std::cerr << config_.logging.log_prefix << " ❌ Failed to create egress subscription (timeout)" << std::endl;
                 return false;
+            }else{
+                // start a new thread with egressPoller
+                egressPollerThread_ = std::thread(&ClusterClient::Impl::startPolling, this);
+                egressPollerThread_.detach();
             }
 
             std::cout << config_.logging.log_prefix << " 📤 Attempting to connect to cluster members..." << std::endl;
@@ -67,15 +73,6 @@ public:
             // Add timeout for session manager connection
             if (!connectSessionManagerWithTimeout()) {
                 std::cerr << config_.logging.log_prefix << " ❌ Failed to connect to any cluster member (timeout)" << std::endl;
-                std::cerr << config_.logging.log_prefix << " 💡 Please ensure:" << std::endl;
-                std::cerr << config_.logging.log_prefix << "   • Aeron Cluster is running at specified endpoints" << std::endl;
-                std::cerr << config_.logging.log_prefix << "   • Network connectivity to cluster nodes" << std::endl;
-                std::cerr << config_.logging.log_prefix << "   • Cluster endpoints are correct: ";
-                for (size_t i = 0; i < config_.cluster_endpoints.size(); ++i) {
-                    std::cerr << config_.cluster_endpoints[i];
-                    if (i < config_.cluster_endpoints.size() - 1) std::cerr << ", ";
-                }
-                std::cerr << std::endl;
                 return false;
             }
 
@@ -86,7 +83,11 @@ public:
             stats_.connection_established_time = std::chrono::steady_clock::now();
             stats_.is_connected = true;
 
-            pollMessages(100);
+            // ADDED: Update session info for keepalives
+            updateSessionInfo(sessionManager_->getLeadershipTermId(), stats_.current_session_id);
+
+            // ADDED: Start keepalive system
+            startKeepaliveSystem();
 
             if (config_.enable_console_info) {
                 std::cout << config_.logging.log_prefix << " ✅ Connected to Aeron Cluster!" << std::endl;
@@ -110,6 +111,8 @@ public:
             return;
         }
 
+        stopKeepaliveSystem();
+
         sessionManager_->disconnect();
         egressSubscription_.reset();
         aeron_.reset();
@@ -118,6 +121,10 @@ public:
         stats_.current_session_id = -1;
         stats_.current_leader_id = -1;
         stats_.is_connected = false;
+
+        // Reset session info
+        leadershipTermId_ = -1;
+        activeSessionId_ = -1;
 
         if (config_.enable_console_info) {
             std::cout << config_.logging.log_prefix << " Disconnected from cluster" << std::endl;
@@ -203,19 +210,21 @@ public:
     }
 
     int pollMessages(int maxMessages) {
-        // if (!isConnected() || !egressSubscription_) {
-        //     std::cout << config_.logging.log_prefix << " Not connected or egress subscription not available" << std::endl;
-        //     return 0;
-        // }
+        if (!egressSubscription_ || egressSubscription_->imageCount() <= 0) {
+            // sleep for a bit if no images are available
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
 
         int messagesProcessed = 0;
-        
+
         try {
             egressSubscription_->poll(
                 [this, &messagesProcessed](aeron::AtomicBuffer& buffer, 
                                           aeron::util::index_t offset, 
                                           aeron::util::index_t length, 
                                           aeron::logbuffer::Header& header) {
+                    std::cout << config_.logging.log_prefix << " 📥 Received message of length: " 
+                              << length << " bytes" << std::endl;
                     handleIncomingMessage(buffer, offset, length, header);
                     messagesProcessed++;
                 }, 
@@ -232,8 +241,141 @@ public:
         return messagesProcessed;
     }
 
+    void startPolling() {
+        // Continuous polling in a separate thread
+        std::cout << config_.logging.log_prefix << " Waiting for egress to be avaliable..." << std::endl;
+        if (!egressSubscription_ || egressSubscription_->imageCount() <= 0) {
+            // sleep for a bit if no images are available
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        std::cout << config_.logging.log_prefix << " Egress is avaliable, polling for messages..."<<egressSubscription_->imageCount() << std::endl;
+
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 🔄 Polling for incoming messages..." << std::endl;
+        }
+        while (true) {
+            int processed = pollMessages(1); // Poll 1 messages at a time
+            if (processed > 0) {
+                if (config_.debug_logging) {
+                    std::cout << config_.logging.log_prefix << " 📥 Processed " << processed 
+                              << " messages" << std::endl;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Sleep to avoid busy-waiting
+            }
+        }
+    }
+
+
     ConnectionStats getConnectionStats() const {
         return stats_;
+    }
+
+    void startKeepaliveSystem() {
+        if (!config_.enable_keepalive || keepaliveRunning_) {
+            return;
+        }
+
+        shouldStopKeepalive_ = false;
+        keepaliveRunning_ = true;
+        lastKeepaliveTime_ = std::chrono::steady_clock::now();
+
+        keepaliveThread_ = std::thread(&ClusterClient::Impl::keepaliveWorker, this);
+
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 💓 Keepalive system started (interval: " 
+                     << config_.keepalive_interval.count() << "ms)" << std::endl;
+        }
+    }
+
+    // Add this method to stop keepalive system
+    void stopKeepaliveSystem() {
+        if (!keepaliveRunning_) {
+            return;
+        }
+
+        shouldStopKeepalive_ = true;
+        keepaliveRunning_ = false;
+
+        if (keepaliveThread_.joinable()) {
+            keepaliveThread_.join();
+        }
+
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 💓 Keepalive system stopped" << std::endl;
+            std::cout << config_.logging.log_prefix << "   Keepalives sent: " << keepalivesSent_ << std::endl;
+            std::cout << config_.logging.log_prefix << "   Keepalives failed: " << keepalivesFailed_ << std::endl;
+        }
+    }
+
+    // Add this method to update session info for keepalives
+    void updateSessionInfo(int64_t leadershipTermId, int64_t sessionId) {
+        leadershipTermId_ = leadershipTermId;
+        activeSessionId_ = sessionId;
+        
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 💓 Updated session info for keepalives:" << std::endl;
+            std::cout << config_.logging.log_prefix << "   Leadership Term ID: " << leadershipTermId << std::endl;
+            std::cout << config_.logging.log_prefix << "   Session ID: " << sessionId << std::endl;
+        }
+    }
+
+    // Add this method to send a single keepalive
+    bool sendKeepalive() {
+        if (!isConnected() || !sessionManager_ || !sessionManager_->isConnected()) {
+            return false;
+        }
+
+        int64_t termId = leadershipTermId_.load();
+        int64_t sessionId = activeSessionId_.load();
+
+        if (termId == -1 || sessionId == -1) {
+            if (config_.debug_logging) {
+                std::cout << config_.logging.log_prefix << " ⚠️  Cannot send keepalive: invalid session info" << std::endl;
+            }
+            return false;
+        }
+
+        try {
+            // Encode keepalive message using SBE
+            std::vector<uint8_t> encodedMessage = SBEEncoder::encodeSessionKeepAlive(termId, sessionId);
+
+            if (config_.debug_logging) {
+                std::cout << config_.logging.log_prefix << " 💓 Sending keepalive:" << std::endl;
+                std::cout << config_.logging.log_prefix << "   Term ID: " << termId << std::endl;
+                std::cout << config_.logging.log_prefix << "   Session ID: " << sessionId << std::endl;
+                std::cout << config_.logging.log_prefix << "   Size: " << encodedMessage.size() << " bytes" << std::endl;
+            }
+
+            // Send via session manager's ingress publication
+            bool success = sessionManager_->sendRawMessage(encodedMessage);
+            
+            if (success) {
+                keepalivesSent_++;
+                lastKeepaliveTime_ = std::chrono::steady_clock::now();
+                
+                if (config_.debug_logging) {
+                    std::cout << config_.logging.log_prefix << " ✅ Keepalive sent successfully (total: " 
+                             << keepalivesSent_ << ")" << std::endl;
+                }
+            } else {
+                keepalivesFailed_++;
+                if (config_.enable_console_warnings) {
+                    std::cout << config_.logging.log_prefix << " ⚠️  Keepalive send failed (total failures: " 
+                             << keepalivesFailed_ << ")" << std::endl;
+                }
+            }
+
+            return success;
+
+        } catch (const std::exception& e) {
+            keepalivesFailed_++;
+            if (config_.enable_console_errors) {
+                std::cerr << config_.logging.log_prefix << " ❌ Keepalive error: " << e.what() << std::endl;
+            }
+            return false;
+        }
     }
 
 private:
@@ -249,11 +391,26 @@ private:
 
     std::atomic<uint64_t> sequenceCounter_;
     std::mt19937 rng_;
+    std::thread egressPollerThread_;
+
+
+    // Keepalive management
+    std::thread keepaliveThread_;
+    std::atomic<bool> keepaliveRunning_{false};
+    std::atomic<bool> shouldStopKeepalive_{false};
+    std::chrono::steady_clock::time_point lastKeepaliveTime_;
+    std::atomic<uint64_t> keepalivesSent_{0};
+    std::atomic<uint64_t> keepalivesFailed_{0};
+    
+    // Leadership and session info for keepalives
+    std::atomic<int64_t> leadershipTermId_{-1};
+    std::atomic<int64_t> activeSessionId_{-1};
+
 
     // FIXED: Add timeout to Aeron initialization
     bool initializeAeronWithTimeout() {
         try {
-            auto startTime = std::chrono::steady_clock::now();
+            // auto startTime = std::chrono::steady_clock::now();
             auto timeout = std::chrono::seconds(5); // 5 second timeout
             
             if (config_.debug_logging) {
@@ -302,9 +459,9 @@ private:
             while ((std::chrono::steady_clock::now() - startTime) < timeout) {
                 egressSubscription_ = aeron_->findSubscription(subId);
                 if (egressSubscription_) {
-                    if (config_.debug_logging) {
+                    // if (config_.debug_logging) {
                         std::cout << config_.logging.log_prefix << " ✅ Egress subscription created successfully" << std::endl;
-                    }
+                    // }
                     return true;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -347,13 +504,13 @@ private:
             }
         });
 
-        std::thread pollingThread([this]() {
-            std::cout << config_.logging.log_prefix << " 📡 Polling messages in background..." << isConnected() << std::endl;
-            while (isConnected() && egressSubscription_) {
-                pollMessages(2); // Poll messages in background
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-        });
+        // std::thread pollingThread([this]() {
+        //     std::cout << config_.logging.log_prefix << " 📡 Polling messages in background..." << isConnected() << std::endl;
+        //     while (isConnected() && egressSubscription_) {
+        //         pollMessages(2); // Poll messages in background
+        //         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        //     }
+        // });
         
         // Wait for connection with timeout
         while (!connectionComplete && 
@@ -432,6 +589,8 @@ private:
         try {
 
             std::cout << config_.logging.log_prefix << " 📥 Incoming message received"  << std::endl;
+            std::cout << config_.logging.log_prefix << "   Position: " << header.position() 
+                     << ", Length: " << length << std::endl;
             const uint8_t* data = buffer.buffer() + offset;
             
             ParseResult result = MessageParser::parseMessage(data, length);
@@ -466,6 +625,60 @@ private:
         uint64_t seq = sequenceCounter_.fetch_add(1);
         int64_t now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
         return "msg_" + std::to_string(now) + "_" + std::to_string(seq);
+    }
+
+    void keepaliveWorker() {
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 💓 Keepalive worker thread started" << std::endl;
+        }
+
+        while (!shouldStopKeepalive_) {
+            try {
+                // Check if we should send a keepalive
+                auto now = std::chrono::steady_clock::now();
+                auto timeSinceLastKeepalive = now - lastKeepaliveTime_;
+
+                if (timeSinceLastKeepalive >= config_.keepalive_interval) {
+                    if (isConnected()) {
+                        // Try to send keepalive with retries
+                        bool success = false;
+                        for (int attempt = 0; attempt < config_.keepalive_max_retries && !shouldStopKeepalive_; ++attempt) {
+                            if (sendKeepalive()) {
+                                success = true;
+                                break;
+                            }
+                            
+                            if (attempt < config_.keepalive_max_retries - 1) {
+                                // Wait a bit before retry
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                        }
+
+                        if (!success && config_.enable_console_warnings) {
+                            std::cout << config_.logging.log_prefix << " ⚠️  Failed to send keepalive after " 
+                                     << config_.keepalive_max_retries << " attempts" << std::endl;
+                        }
+                    } else {
+                        // Update last keepalive time even if not connected to avoid spam
+                        lastKeepaliveTime_ = now;
+                    }
+                }
+
+                // Sleep for a short interval
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            } catch (const std::exception& e) {
+                if (config_.enable_console_errors) {
+                    std::cerr << config_.logging.log_prefix << " ❌ Keepalive worker error: " 
+                             << e.what() << std::endl;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+        }
+
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " 💓 Keepalive worker thread stopped" << std::endl;
+        }
     }
 };
 
