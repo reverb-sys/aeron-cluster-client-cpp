@@ -27,6 +27,8 @@ public:
     
     void handleSessionEvent(const ParseResult& result);
     std::string resolveEgressEndpoint(const std::string& channel);
+    int64_t getLeadershipTermId();
+    bool sendRawMessage(const std::vector<uint8_t>& encodedMessage);
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
