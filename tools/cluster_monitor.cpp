@@ -105,10 +105,10 @@ bool testMemberConnectivity(const std::string& endpoint,
         
         // Create a minimal configuration for testing
         auto config = ClusterClientConfigBuilder()
-            .withClusterEndpoints({endpoint})
-            .withAeronDir(aeronDir)
-            .withResponseTimeout(std::chrono::duration_cast<std::chrono::milliseconds>(timeout))
-            .withMaxRetries(1)
+            .with_cluster_endpoints({endpoint})
+            .with_aeron_dir(aeronDir)
+            .with_response_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(timeout))
+            .with_max_retries(1)
             .build();
         
         // Disable logging for clean output
@@ -132,7 +132,7 @@ bool testMemberConnectivity(const std::string& endpoint,
             stats.lastError.clear();
             
             // Check if this member is the leader
-            int64_t sessionId = client.getSessionId();
+            int64_t sessionId = client.get_session_id();
             stats.isLeader = (sessionId > 0);
             
             if (verbose) {

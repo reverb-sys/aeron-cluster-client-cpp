@@ -13,15 +13,28 @@
 namespace aeron_cluster {
 
 // SBEEncoder implementation
+void write_uint_16(std::vector<uint8_t>& buffer, size_t offset, uint16_t value) {
+    buffer[offset] = static_cast<uint8_t>(value & 0xFF);
+    buffer[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+}
 
-std::vector<uint8_t> SBEEncoder::encodeSessionConnectRequest(int64_t correlationId,
-                                                             int32_t responseStreamId,
-                                                             const std::string& responseChannel,
-                                                             int32_t protocolVersion) {
+// static void SBEDecoder::write_int_64(std::vector<uint8_t>& buffer, size_t offset, int64_t
+// value) {
+
+void write_int_64(std::vector<uint8_t>& buffer, size_t offset, int64_t value) {
+    for (int i = 0; i < 8; ++i) {
+        buffer[offset + i] = static_cast<uint8_t>((value >> (i * 8)) & 0xFF);
+    }
+}
+
+std::vector<uint8_t> SBEEncoder::encode_session_connect_request(int64_t correlationId,
+                                                                int32_t responseStreamId,
+                                                                const std::string& responseChannel,
+                                                                int32_t protocolVersion) {
     std::vector<uint8_t> responseChannelBytes(responseChannel.begin(), responseChannel.end());
 
     // Calculate total message size
-    size_t totalSize = sizeof(MessageHeader) + SessionConnectRequest::sbeBlockLength() + 4 +
+    size_t totalSize = sizeof(MessageHeader) + SessionConnectRequest::sbe_block_length() + 4 +
                        responseChannelBytes.size();  // length prefix + channel data
 
     std::vector<uint8_t> buffer(totalSize);
@@ -29,10 +42,10 @@ std::vector<uint8_t> SBEEncoder::encodeSessionConnectRequest(int64_t correlation
 
     // Encode SBE header
     MessageHeader header;
-    header.blockLength = SessionConnectRequest::sbeBlockLength();
-    header.templateId = SessionConnectRequest::sbeTemplateId();
-    header.schemaId = SessionConnectRequest::sbeSchemaId();
-    header.version = SessionConnectRequest::sbeSchemaVersion();
+    header.block_length = SessionConnectRequest::sbe_block_length();
+    header.template_id = SessionConnectRequest::sbe_template_id();
+    header.schema_id = SessionConnectRequest::sbe_schema_id();
+    header.version = SessionConnectRequest::sbe_schema_version();
 
     std::memcpy(ptr, &header, sizeof(MessageHeader));
     ptr += sizeof(MessageHeader);
@@ -57,61 +70,60 @@ std::vector<uint8_t> SBEEncoder::encodeSessionConnectRequest(int64_t correlation
     return buffer;
 }
 
-std::vector<uint8_t> SBEEncoder::encodeSessionKeepAlive(int64_t leadershipTermId,
-                                                       int64_t clusterSessionId) {
-        // This should match the Go code's keepalive message structure
-        // Based on the Go code: SessionKeepAliveTemplateId with 16 bytes block length
+std::vector<uint8_t> SBEEncoder::encode_session_keep_alive(int64_t leadershipTermId,
+                                                           int64_t clusterSessionId) {
+    // This should match the Go code's keepalive message structure
+    // Based on the Go code: SessionKeepAliveTemplateId with 16 bytes block length
 
-        std::vector<uint8_t> message;
-        message.resize(SBEConstants::SBE_HEADER_LENGTH + 16);  // Header + keepalive data
+    std::vector<uint8_t> message;
+    message.resize(SBEConstants::SBE_HEADER_LENGTH + 16);  // Header + keepalive data
 
-        size_t offset = 0;
+    size_t offset = 0;
 
-        // SBE Header
-        writeUint16(message, offset, 16);  // block length
-        offset += 2;
-        writeUint16(message, offset, SBEConstants::SESSION_KEEPALIVE_TEMPLATE_ID);  // template ID
-        offset += 2;
-        writeUint16(message, offset, SBEConstants::CLUSTER_SCHEMA_ID);  // schema ID
-        offset += 2;
-        writeUint16(message, offset, SBEConstants::CLUSTER_SCHEMA_VERSION);  // schema version
-        offset += 2;
+    // SBE Header
+    write_uint_16(message, offset, 16);  // block length
+    offset += 2;
+    write_uint_16(message, offset, SBEConstants::SESSION_KEEPALIVE_TEMPLATE_ID);  // template ID
+    offset += 2;
+    write_uint_16(message, offset, SBEConstants::CLUSTER_SCHEMA_ID);  // schema ID
+    offset += 2;
+    write_uint_16(message, offset, SBEConstants::CLUSTER_SCHEMA_VERSION);  // schema version
+    offset += 2;
 
-        // Keepalive data (16 bytes)
-        writeInt64(message, offset, leadershipTermId);
-        offset += 8;
-        writeInt64(message, offset, clusterSessionId);
-        offset += 8;
+    // Keepalive data (16 bytes)
+    write_int_64(message, offset, leadershipTermId);
+    offset += 8;
+    write_int_64(message, offset, clusterSessionId);
+    offset += 8;
 
-        return message;
-    }
+    return message;
+}
 
-std::vector<uint8_t> SBEEncoder::encodeTopicMessage(const std::string& topic,
-                                                    const std::string& messageType,
-                                                    const std::string& uuid,
-                                                    const std::string& payload,
-                                                    const std::string& headers, int64_t timestamp) {
+std::vector<uint8_t> SBEEncoder::encode_topic_message(
+    const std::string& topic, const std::string& messageType, const std::string& uuid,
+    const std::string& payload, const std::string& headers, int64_t timestamp) {
     // Use current timestamp if not provided
     if (timestamp == 0) {
-        timestamp = getCurrentTimestamp();
+        timestamp = get_current_timestamp();
     }
 
     // Calculate variable field sizes
     std::vector<std::string> variableFields = {topic, messageType, uuid, payload, headers};
-    size_t variableFieldsSize = calculateVariableFieldsSize(variableFields);
+    size_t variableFieldsSize = calculate_variable_fields_size(variableFields);
 
     // Calculate total message size
-    size_t totalSize = sizeof(MessageHeader) + TopicMessage::sbeBlockLength() + variableFieldsSize;
+    size_t totalSize =
+        sizeof(MessageHeader) + TopicMessage::sbe_block_length() + variableFieldsSize;
 
     std::vector<uint8_t> buffer(totalSize);
     uint8_t* ptr = buffer.data();
 
     // Encode SBE header
     MessageHeader header;
-    header.blockLength = TopicMessage::sbeBlockLength();
-    header.templateId = TopicMessage::sbeTemplateId();
-    header.schemaId = TopicMessage::sbeSchemaId();
-    header.version = TopicMessage::sbeSchemaVersion();
+    header.block_length = TopicMessage::sbe_block_length();
+    header.template_id = TopicMessage::sbe_template_id();
+    header.schema_id = TopicMessage::sbe_schema_id();
+    header.version = TopicMessage::sbe_schema_version();
 
     std::memcpy(ptr, &header, sizeof(MessageHeader));
     ptr += sizeof(MessageHeader);
@@ -126,21 +138,19 @@ std::vector<uint8_t> SBEEncoder::encodeTopicMessage(const std::string& topic,
 
     // Encode variable length fields in order
     for (const auto& field : variableFields) {
-        ptr += encodeVariableString(field, buffer, ptr - buffer.data()) - (ptr - buffer.data());
+        ptr += encode_variable_string(field, buffer, ptr - buffer.data()) - (ptr - buffer.data());
     }
 
     return buffer;
 }
 
-
-
-int64_t SBEEncoder::getCurrentTimestamp() {
+int64_t SBEEncoder::get_current_timestamp() {
     auto now = std::chrono::high_resolution_clock::now();
     return now.time_since_epoch().count();
 }
 
-size_t SBEEncoder::encodeVariableString(const std::string& str, std::vector<uint8_t>& buffer,
-                                        size_t offset) {
+size_t SBEEncoder::encode_variable_string(const std::string& str, std::vector<uint8_t>& buffer,
+                                          size_t offset) {
     uint8_t* ptr = buffer.data() + offset;
 
     // Encode length prefix
@@ -155,7 +165,7 @@ size_t SBEEncoder::encodeVariableString(const std::string& str, std::vector<uint
     return ptr - buffer.data();
 }
 
-size_t SBEEncoder::calculateVariableFieldsSize(const std::vector<std::string>& fields) {
+size_t SBEEncoder::calculate_variable_fields_size(const std::vector<std::string>& fields) {
     size_t totalSize = 0;
     for (const auto& field : fields) {
         totalSize += sizeof(uint32_t) + field.length();  // length prefix + data
@@ -165,7 +175,7 @@ size_t SBEEncoder::calculateVariableFieldsSize(const std::vector<std::string>& f
 
 // SBEDecoder implementation
 
-bool SBEDecoder::decodeMessageHeader(const uint8_t* data, size_t length, MessageHeader& header) {
+bool SBEDecoder::decode_message_header(const uint8_t* data, size_t length, MessageHeader& header) {
     if (!data || length < sizeof(MessageHeader)) {
         return false;
     }
@@ -174,129 +184,164 @@ bool SBEDecoder::decodeMessageHeader(const uint8_t* data, size_t length, Message
     return true;
 }
 
-bool SBEDecoder::decodeSessionEvent(const uint8_t* data, size_t length, SessionEvent& event,
-                                    std::string& detail) {
-    if (!data || length < sizeof(MessageHeader) + SessionEvent::sbeBlockLength()) {
+bool SBEDecoder::decode_session_event(const uint8_t* data, size_t length, SessionEvent& event,
+                                      std::string& detail) {
+    if (!data || length < sizeof(MessageHeader) + SessionEvent::sbe_block_length()) {
         return false;
     }
+
+    // Show the data in str format for debugging
+    // Show the data in str format for debugging
+    // Show raw binary data with better formatting
+    std::cout << "Raw data analysis (" << length << " bytes):" << std::endl;
+    
+    // Show hex dump for first 64 bytes
+    std::cout << "Hex dump: ";
+    for (size_t i = 0; i < length && i < 64; ++i) {
+        std::cout << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned>(data[i]) << " ";
+        if ((i + 1) % 16 == 0) std::cout << std::endl << "          ";
+    }
+    std::cout << std::dec << std::endl;
+    
+    // Try to extract any readable strings
+    std::cout << "Readable content: ";
+    std::string readable;
+    for (size_t i = 0; i < length && i < 256; ++i) {
+        char c = static_cast<char>(data[i]);
+        if (c >= 32 && c <= 126) {
+            readable += c;
+        } else if (!readable.empty()) {
+            if (readable.length() >= 3) {
+                std::cout << "\"" << readable << "\" ";
+            }
+            readable.clear();
+        }
+    }
+    if (readable.length() >= 3) {
+        std::cout << "\"" << readable << "\"";
+    }
+    std::cout << std::endl;
 
     // Verify header
     MessageHeader header;
-    if (!decodeMessageHeader(data, length, header)) {
+    if (!decode_message_header(data, length, header)) {
         return false;
     }
 
-    if (!validateHeader(header, SessionEvent::sbeTemplateId(), SessionEvent::sbeSchemaId())) {
+    if (!validate_header(header, SessionEvent::sbe_template_id(), SessionEvent::sbe_schema_id())) {
         return false;
     }
 
     // Decode fixed block
     const uint8_t* ptr = data + sizeof(MessageHeader);
-    std::memcpy(&event, ptr, SessionEvent::sbeBlockLength());
-    ptr += SessionEvent::sbeBlockLength();
+
+    std::memcpy(&event, ptr, SessionEvent::sbe_block_length());
+    ptr += SessionEvent::sbe_block_length();
 
     // Decode variable length detail if present
-    size_t remaining = length - sizeof(MessageHeader) - SessionEvent::sbeBlockLength();
+    size_t remaining = length - sizeof(MessageHeader) - SessionEvent::sbe_block_length();
     if (remaining > 0) {
-        extractVariableString(ptr, 0, remaining, detail);
+        extract_variable_string(ptr, 0, remaining, detail);
     }
 
     return true;
 }
 
-bool SBEDecoder::decodeTopicMessage(const uint8_t* data, size_t length, std::string& topic,
-                                    std::string& messageType, std::string& uuid,
-                                    std::string& payload, std::string& headers,
-                                    int64_t& timestamp) {
-    if (!data || length < sizeof(MessageHeader) + TopicMessage::sbeBlockLength()) {
+bool SBEDecoder::decode_topic_message(const uint8_t* data, size_t length, std::string& topic,
+                                      std::string& messageType, std::string& uuid,
+                                      std::string& payload, std::string& headers,
+                                      int64_t& timestamp) {
+    if (!data || length < sizeof(MessageHeader) + TopicMessage::sbe_block_length()) {
         return false;
     }
 
     // Verify header
     MessageHeader header;
-    if (!decodeMessageHeader(data, length, header)) {
+    if (!decode_message_header(data, length, header)) {
         return false;
     }
 
-    if (!validateHeader(header, TopicMessage::sbeTemplateId(), TopicMessage::sbeSchemaId())) {
+    if (!validate_header(header, TopicMessage::sbe_template_id(), TopicMessage::sbe_schema_id())) {
         return false;
     }
 
     // Decode fixed block
     const uint8_t* ptr = data + sizeof(MessageHeader);
     std::memcpy(&timestamp, ptr, sizeof(int64_t));
-    ptr += TopicMessage::sbeBlockLength();  // Skip entire fixed block including padding
+    ptr += TopicMessage::sbe_block_length();  // Skip entire fixed block including padding
 
     // Decode variable length fields
-    size_t remaining = length - sizeof(MessageHeader) - TopicMessage::sbeBlockLength();
+    size_t remaining = length - sizeof(MessageHeader) - TopicMessage::sbe_block_length();
     size_t offset = 0;
 
     // Extract fields in order: topic, messageType, uuid, payload, headers
-    offset = extractVariableString(ptr, offset, remaining, topic);
+    offset = extract_variable_string(ptr, offset, remaining, topic);
     if (offset == 0)
         return false;
 
-    offset = extractVariableString(ptr, offset, remaining, messageType);
+    offset = extract_variable_string(ptr, offset, remaining, messageType);
     if (offset == 0)
         return false;
 
-    offset = extractVariableString(ptr, offset, remaining, uuid);
+    offset = extract_variable_string(ptr, offset, remaining, uuid);
     if (offset == 0)
         return false;
 
-    offset = extractVariableString(ptr, offset, remaining, payload);
+    offset = extract_variable_string(ptr, offset, remaining, payload);
     if (offset == 0)
         return false;
 
-    extractVariableString(ptr, offset, remaining, headers);
+    extract_variable_string(ptr, offset, remaining, headers);
 
     return true;
 }
 
-bool SBEDecoder::decodeAcknowledgment(const uint8_t* data, size_t length, std::string& messageId,
-                                      std::string& status, std::string& error, int64_t& timestamp) {
-    if (!data || length < sizeof(MessageHeader) + Acknowledgment::sbeBlockLength()) {
+bool SBEDecoder::decode_acknowledgment(const uint8_t* data, size_t length, std::string& messageId,
+                                       std::string& status, std::string& error,
+                                       int64_t& timestamp) {
+    if (!data || length < sizeof(MessageHeader) + Acknowledgment::sbe_block_length()) {
         return false;
     }
 
     // Verify header
     MessageHeader header;
-    if (!decodeMessageHeader(data, length, header)) {
+    if (!decode_message_header(data, length, header)) {
         return false;
     }
 
-    if (!validateHeader(header, Acknowledgment::sbeTemplateId(), Acknowledgment::sbeSchemaId())) {
+    if (!validate_header(header, Acknowledgment::sbe_template_id(),
+                         Acknowledgment::sbe_schema_id())) {
         return false;
     }
 
     // Decode fixed block
     const uint8_t* ptr = data + sizeof(MessageHeader);
     std::memcpy(&timestamp, ptr, sizeof(int64_t));
-    ptr += Acknowledgment::sbeBlockLength();
+    ptr += Acknowledgment::sbe_block_length();
 
     // Decode variable length fields
-    size_t remaining = length - sizeof(MessageHeader) - Acknowledgment::sbeBlockLength();
+    size_t remaining = length - sizeof(MessageHeader) - Acknowledgment::sbe_block_length();
     size_t offset = 0;
 
     // Extract fields in order: messageId, status, error (optional)
-    offset = extractVariableString(ptr, offset, remaining, messageId);
+    offset = extract_variable_string(ptr, offset, remaining, messageId);
     if (offset == 0)
         return false;
 
-    offset = extractVariableString(ptr, offset, remaining, status);
+    offset = extract_variable_string(ptr, offset, remaining, status);
     if (offset == 0)
         return false;
 
     // Error field is optional
     if (offset < remaining) {
-        extractVariableString(ptr, offset, remaining, error);
+        extract_variable_string(ptr, offset, remaining, error);
     }
 
     return true;
 }
 
-size_t SBEDecoder::extractVariableString(const uint8_t* data, size_t offset, size_t remainingLength,
-                                         std::string& output) {
+size_t SBEDecoder::extract_variable_string(const uint8_t* data, size_t offset,
+                                           size_t remainingLength, std::string& output) {
     if (offset + sizeof(uint32_t) > remainingLength) {
         return 0;  // Not enough data for length prefix
     }
@@ -325,16 +370,16 @@ size_t SBEDecoder::extractVariableString(const uint8_t* data, size_t offset, siz
     return offset;
 }
 
-bool SBEDecoder::validateHeader(const MessageHeader& header, uint16_t expectedTemplateId,
-                                uint16_t expectedSchemaId) {
-    return header.templateId == expectedTemplateId && header.schemaId == expectedSchemaId;
+bool SBEDecoder::validate_header(const MessageHeader& header, uint16_t expectedTemplateId,
+                                 uint16_t expectedSchemaId) {
+    return header.template_id == expectedTemplateId && header.schema_id == expectedSchemaId;
 }
 
 // SBEUtils implementation
 
 namespace SBEUtils {
 
-void printHexDump(const uint8_t* data, size_t length, const std::string& prefix, size_t maxBytes) {
+void print_hex_dump(const uint8_t* data, size_t length, const std::string& prefix, size_t maxBytes) {
     if (!data || length == 0) {
         return;
     }
@@ -375,7 +420,7 @@ void printHexDump(const uint8_t* data, size_t length, const std::string& prefix,
     }
 }
 
-std::string getSessionEventCodeString(int32_t code) {
+std::string get_session_event_code_string(int32_t code) {
     switch (code) {
         case SBEConstants::SESSION_EVENT_OK:
             return "OK";
@@ -392,7 +437,7 @@ std::string getSessionEventCodeString(int32_t code) {
     }
 }
 
-std::string getMessageTypeName(uint16_t templateId, uint16_t schemaId) {
+std::string get_message_type_name(uint16_t templateId, uint16_t schemaId) {
     if (schemaId == SBEConstants::CLUSTER_SCHEMA_ID) {
         switch (templateId) {
             case SBEConstants::SESSION_CONNECT_TEMPLATE_ID:
@@ -416,12 +461,12 @@ std::string getMessageTypeName(uint16_t templateId, uint16_t schemaId) {
     }
 }
 
-bool isValidCorrelationId(int64_t correlationId) {
+bool is_valid_correlation_id(int64_t correlationId) {
     // Basic validation - should be positive and within reasonable range
     return correlationId > 0 && correlationId <= 0x7FFFFFFFFFFFFFFFLL;
 }
 
-int64_t generateCorrelationId() {
+int64_t generate_correlation_id() {
     auto now = std::chrono::high_resolution_clock::now();
     int64_t timestamp = now.time_since_epoch().count();
 
@@ -429,7 +474,7 @@ int64_t generateCorrelationId() {
     return timestamp & 0x7FFFFFFFFFFFFFFFLL;
 }
 
-std::string formatTimestamp(int64_t timestamp) {
+std::string format_timestamp(int64_t timestamp) {
     // Convert nanoseconds to time_point
     auto timePoint =
         std::chrono::time_point<std::chrono::system_clock>(std::chrono::nanoseconds(timestamp));
@@ -445,7 +490,7 @@ std::string formatTimestamp(int64_t timestamp) {
     return ss.str();
 }
 
-bool isValidSBEMessage(const uint8_t* data, size_t length) {
+bool is_valid_sbe_message(const uint8_t* data, size_t length) {
     if (!data || length < sizeof(MessageHeader)) {
         return false;
     }
@@ -454,24 +499,24 @@ bool isValidSBEMessage(const uint8_t* data, size_t length) {
     std::memcpy(&header, data, sizeof(MessageHeader));
 
     // Basic sanity checks
-    if (header.blockLength == 0 || header.blockLength > 10000) {
+    if (header.block_length == 0 || header.block_length > 10000) {
         return false;
     }
 
-    if (length < sizeof(MessageHeader) + header.blockLength) {
+    if (length < sizeof(MessageHeader) + header.block_length) {
         return false;
     }
 
     // Check for known schema IDs
-    if (header.schemaId != SBEConstants::CLUSTER_SCHEMA_ID &&
-        header.schemaId != SBEConstants::TOPIC_SCHEMA_ID) {
+    if (header.schema_id != SBEConstants::CLUSTER_SCHEMA_ID &&
+        header.schema_id != SBEConstants::TOPIC_SCHEMA_ID) {
         return false;
     }
 
     return true;
 }
 
-std::vector<std::string> extractReadableStrings(const uint8_t* data, size_t length,
+std::vector<std::string> extract_readable_strings(const uint8_t* data, size_t length,
                                                 size_t minLength) {
     std::vector<std::string> strings;
 
@@ -504,23 +549,23 @@ std::vector<std::string> extractReadableStrings(const uint8_t* data, size_t leng
 
 // ParseResult implementation
 
-std::string ParseResult::getDescription() const {
+std::string ParseResult::get_description() const {
     std::stringstream ss;
 
     if (success) {
-        ss << SBEUtils::getMessageTypeName(templateId, schemaId);
+        ss << SBEUtils::get_message_type_name(template_id, schema_id);
 
-        if (isSessionEvent()) {
-            ss << " (code: " << SBEUtils::getSessionEventCodeString(eventCode) << ")";
-        } else if (!messageType.empty()) {
-            ss << " (type: " << messageType << ")";
+        if (is_session_event()) {
+            ss << " (code: " << SBEUtils::get_session_event_code_string(event_code) << ")";
+        } else if (!message_type.empty()) {
+            ss << " (type: " << message_type << ")";
         }
 
-        if (!messageId.empty()) {
-            ss << " [ID: " << messageId.substr(0, 8) << "...]";
+        if (!message_id.empty()) {
+            ss << " [ID: " << message_id.substr(0, 8) << "...]";
         }
     } else {
-        ss << "Parse Error: " << errorMessage;
+        ss << "Parse Error: " << error_message;
     }
 
     return ss.str();
@@ -528,63 +573,64 @@ std::string ParseResult::getDescription() const {
 
 // MessageParser implementation
 
-ParseResult MessageParser::parseMessage(const uint8_t* data, size_t length) {
+ParseResult MessageParser::parse_message(const uint8_t* data, size_t length) {
     ParseResult result;
 
     if (!data || length == 0) {
-        result.errorMessage = "Null or empty data";
+        result.error_message = "Null or empty data";
         return result;
     }
 
     // Decode header first
-    if (!SBEDecoder::decodeMessageHeader(data, length, reinterpret_cast<MessageHeader&>(result))) {
-        result.errorMessage = "Failed to decode message header";
+    if (!SBEDecoder::decode_message_header(data, length,
+                                           reinterpret_cast<MessageHeader&>(result))) {
+        result.error_message = "Failed to decode message header";
         return result;
     }
 
     // Extract header fields
     MessageHeader header;
     std::memcpy(&header, data, sizeof(MessageHeader));
-    result.templateId = header.templateId;
-    result.schemaId = header.schemaId;
+    result.template_id = header.template_id;
+    result.schema_id = header.schema_id;
     result.version = header.version;
-    result.blockLength = header.blockLength;
+    result.block_length = header.block_length;
 
     // Parse based on message type
-    if (result.isSessionEvent()) {
-        return parseSessionEvent(data, length);
-    } else if (result.isTopicMessage()) {
-        return parseTopicMessage(data, length);
-    } else if (result.isAcknowledgment()) {
-        return parseAcknowledgment(data, length);
+    if (result.is_session_event()) {
+        return parse_session_event(data, length);
+    } else if (result.is_topic_message()) {
+        return parse_topic_message(data, length);
+    } else if (result.is_acknowledgment()) {
+        return parse_acknowledgment(data, length);
     } else {
-        result.errorMessage =
-            "Unknown message type: template=" + std::to_string(result.templateId) +
-            ", schema=" + std::to_string(result.schemaId);
+        result.error_message =
+            "Unknown message type: template=" + std::to_string(result.template_id) +
+            ", schema=" + std::to_string(result.schema_id);
         return result;
     }
 }
 
-ParseResult MessageParser::parseMessageDebug(const uint8_t* data, size_t length,
-                                             const std::string& debugPrefix) {
+ParseResult MessageParser::parse_message_debug(const uint8_t* data, size_t length,
+                                               const std::string& debugPrefix) {
     std::cout << debugPrefix << "📋 Parsing message (" << length << " bytes)" << std::endl;
 
     if (length > 0 && length <= 200) {
         std::cout << debugPrefix << "📋 Hex dump:" << std::endl;
-        SBEUtils::printHexDump(data, length, debugPrefix + "  ");
+        SBEUtils::print_hex_dump(data, length, debugPrefix + "  ", 64);
     }
 
-    ParseResult result = parseMessage(data, length);
+    ParseResult result = parse_message(data, length);
 
     std::cout << debugPrefix << "📋 Parse result: " << (result.success ? "SUCCESS" : "FAILED")
               << std::endl;
-    std::cout << debugPrefix << "📋 Description: " << result.getDescription() << std::endl;
+    std::cout << debugPrefix << "📋 Description: " << result.get_description() << std::endl;
 
     if (!result.success) {
-        std::cout << debugPrefix << "📋 Error: " << result.errorMessage << std::endl;
+        std::cout << debugPrefix << "📋 Error: " << result.error_message << std::endl;
 
         // Try to extract readable strings for debugging
-        auto strings = SBEUtils::extractReadableStrings(data, length, 3);
+        auto strings = SBEUtils::extract_readable_strings(data, length, 3);
         if (!strings.empty()) {
             std::cout << debugPrefix << "📋 Readable strings found:" << std::endl;
             for (const auto& str : strings) {
@@ -596,7 +642,7 @@ ParseResult MessageParser::parseMessageDebug(const uint8_t* data, size_t length,
     return result;
 }
 
-std::string MessageParser::getMessageType(const uint8_t* data, size_t length) {
+std::string MessageParser::get_message_type(const uint8_t* data, size_t length) {
     if (!data || length < sizeof(MessageHeader)) {
         return "INVALID";
     }
@@ -604,10 +650,10 @@ std::string MessageParser::getMessageType(const uint8_t* data, size_t length) {
     MessageHeader header;
     std::memcpy(&header, data, sizeof(MessageHeader));
 
-    return SBEUtils::getMessageTypeName(header.templateId, header.schemaId);
+    return SBEUtils::get_message_type_name(header.template_id, header.schema_id);
 }
 
-int64_t MessageParser::extractCorrelationId(const uint8_t* data, size_t length) {
+int64_t MessageParser::extract_correlation_id(const uint8_t* data, size_t length) {
     if (!data || length < sizeof(MessageHeader) + sizeof(int64_t)) {
         return 0;
     }
@@ -616,7 +662,7 @@ int64_t MessageParser::extractCorrelationId(const uint8_t* data, size_t length) 
     std::memcpy(&header, data, sizeof(MessageHeader));
 
     // Correlation ID is typically the first field after header for cluster messages
-    if (header.schemaId == SBEConstants::CLUSTER_SCHEMA_ID) {
+    if (header.schema_id == SBEConstants::CLUSTER_SCHEMA_ID) {
         int64_t correlationId;
         std::memcpy(&correlationId, data + sizeof(MessageHeader), sizeof(int64_t));
         return correlationId;
@@ -625,69 +671,68 @@ int64_t MessageParser::extractCorrelationId(const uint8_t* data, size_t length) 
     return 0;
 }
 
-bool MessageParser::isAcknowledgmentFor(const uint8_t* data, size_t length,
-                                        const std::string& messageId) {
-    ParseResult result = parseMessage(data, length);
+bool MessageParser::is_acknowledgment_for(const uint8_t* data, size_t length,
+                                          const std::string& message_id) {
+    ParseResult result = parse_message(data, length);
 
-    if (!result.success || !result.isAcknowledgment()) {
+    if (!result.success || !result.is_acknowledgment()) {
         return false;
     }
 
     // Check if the acknowledgment contains our message ID
-    return result.messageId == messageId || result.payload.find(messageId) != std::string::npos ||
-           result.headers.find(messageId) != std::string::npos;
+    return result.message_id == message_id ||
+           result.payload.find(message_id) != std::string::npos ||
+           result.headers.find(message_id) != std::string::npos;
 }
 
-ParseResult MessageParser::parseSessionEvent(const uint8_t* data, size_t length) {
+ParseResult MessageParser::parse_session_event(const uint8_t* data, size_t length) {
     ParseResult result;
 
     SessionEvent event;
     std::string detail;
 
-    if (!SBEDecoder::decodeSessionEvent(data, length, event, detail)) {
-        result.errorMessage = "Failed to decode SessionEvent";
+    if (!SBEDecoder::decode_session_event(data, length, event, detail)) {
+        result.error_message = "Failed to decode SessionEvent";
         return result;
     }
 
     // Fill result structure
     result.success = true;
-    result.messageType = "SessionEvent";
-    result.correlationId = event.correlationId;
-    result.sessionId = event.clusterSessionId;
-    result.leaderMemberId = event.leaderMemberId;
-    result.leadershipTermId = event.leadershipTermId;
-
-    result.eventCode = event.code;
+    result.message_type = "SessionEvent";
+    result.correlation_id = event.correlation_id;
+    result.session_id = event.cluster_session_id;
+    result.leader_member_id = event.leader_member_id;
+    result.event_code = event.code;
     result.payload = detail;
     result.timestamp = 0;  // SessionEvent doesn't have a timestamp field
 
     // Extract header info
     MessageHeader header;
     std::memcpy(&header, data, sizeof(MessageHeader));
-    result.templateId = header.templateId;
-    result.schemaId = header.schemaId;
+    result.template_id = header.template_id;
+    result.schema_id = header.schema_id;
     result.version = header.version;
-    result.blockLength = header.blockLength;
+    result.block_length = header.block_length;
 
     return result;
 }
 
-ParseResult MessageParser::parseTopicMessage(const uint8_t* data, size_t length) {
+ParseResult MessageParser::parse_topic_message(const uint8_t* data, size_t length) {
     ParseResult result;
 
-    std::string topic, messageType, uuid, payload, headers;
+    std::string topic, message_type, uuid, payload, headers;
     int64_t timestamp;
 
-    if (!SBEDecoder::decodeTopicMessage(data, length, topic, messageType, uuid, payload, headers,
-                                        timestamp)) {
-        result.errorMessage = "Failed to decode TopicMessage";
+    if (!SBEDecoder::decode_topic_message(data, length, topic, message_type, uuid, payload, headers,
+                                          timestamp)) {
+        result.error_message = "Failed to decode TopicMessage";
         return result;
     }
 
     // Fill result structure
     result.success = true;
-    result.messageType = messageType;
-    result.messageId = uuid;
+    result.message_type = message_type;
+    result.message_id = uuid;
     result.payload = payload;
     result.headers = headers;
     result.timestamp = timestamp;
@@ -695,29 +740,29 @@ ParseResult MessageParser::parseTopicMessage(const uint8_t* data, size_t length)
     // Extract header info
     MessageHeader header;
     std::memcpy(&header, data, sizeof(MessageHeader));
-    result.templateId = header.templateId;
-    result.schemaId = header.schemaId;
+    result.template_id = header.template_id;
+    result.schema_id = header.schema_id;
     result.version = header.version;
-    result.blockLength = header.blockLength;
-
+    result.block_length = header.block_length;
+    // result.topic = topic; // Store topic for easy access
     return result;
 }
 
-ParseResult MessageParser::parseAcknowledgment(const uint8_t* data, size_t length) {
+ParseResult MessageParser::parse_acknowledgment(const uint8_t* data, size_t length) {
     ParseResult result;
 
-    std::string messageId, status, error;
+    std::string message_id, status, error;
     int64_t timestamp;
 
-    if (!SBEDecoder::decodeAcknowledgment(data, length, messageId, status, error, timestamp)) {
-        result.errorMessage = "Failed to decode Acknowledgment";
+    if (!SBEDecoder::decode_acknowledgment(data, length, message_id, status, error, timestamp)) {
+        result.error_message = "Failed to decode Acknowledgment";
         return result;
     }
 
     // Fill result structure
     result.success = true;
-    result.messageType = "Acknowledgment";
-    result.messageId = messageId;
+    result.message_type = "Acknowledgment";
+    result.message_id = message_id;
     result.payload = status;
     result.headers = error;  // Use headers field for error message
     result.timestamp = timestamp;
@@ -725,15 +770,15 @@ ParseResult MessageParser::parseAcknowledgment(const uint8_t* data, size_t lengt
     // Extract header info
     MessageHeader header;
     std::memcpy(&header, data, sizeof(MessageHeader));
-    result.templateId = header.templateId;
-    result.schemaId = header.schemaId;
+    result.template_id = header.template_id;
+    result.schema_id = header.schema_id;
     result.version = header.version;
-    result.blockLength = header.blockLength;
-
+    result.block_length = header.block_length;
+    // result.event_code = 0; // Acknowledgment doesn't have an event code
     return result;
 }
 
-void MessageParser::addDebugInfo(ParseResult& result, const uint8_t* data, size_t length) {
+void MessageParser::add_debug_info(ParseResult& result, const uint8_t* data, size_t length) {
     // This function could add additional debugging information to the result
     // For now, it's a placeholder for future debugging enhancements
     (void)result;  // Suppress unused parameter warning
