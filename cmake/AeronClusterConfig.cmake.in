@@ -1,0 +1,38 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find dependencies that AeronCluster requires
+find_dependency(Threads)
+
+# Find Aeron
+find_path(AERON_INCLUDE_DIR
+    NAMES Aeron.h
+    HINTS ${AERON_ROOT}/include /usr/local/include /usr/include
+    PATH_SUFFIXES aeron
+)
+
+find_library(AERON_LIBRARY
+    NAMES aeron
+    HINTS ${AERON_ROOT}/lib /usr/local/lib /usr/lib
+)
+
+if(NOT AERON_INCLUDE_DIR OR NOT AERON_LIBRARY)
+    set(AeronCluster_FOUND FALSE)
+    return()
+endif()
+
+# Find JsonCpp
+find_dependency(jsoncpp)
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/AeronClusterTargets.cmake")
+
+# Set variables for compatibility
+set(AERON_CLUSTER_LIBRARIES AeronCluster::aeron-cluster-cpp)
+set(AERON_CLUSTER_INCLUDE_DIRS 
+    "${PACKAGE_PREFIX_DIR}/include"
+    "${AERON_INCLUDE_DIR}"
+)
+
+check_required_components(AeronCluster)

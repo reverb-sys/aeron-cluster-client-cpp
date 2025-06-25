@@ -5,20 +5,46 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <stdexcept>
 
 namespace aeron_cluster {
 
 // Order implementation
+Order::Order(const std::string& base, const std::string& quote, 
+             const std::string& side, double qty, const std::string& type)
+    : base_token(base)
+    , quote_token(quote)
+    , side(side)
+    , quantity(qty)
+    , order_type(type)
+{
+    quantity_token = base_token;
+    limit_price_token = quote_token;
+    initialize_timestamps();
+    generate_client_order_uuid();
+}
 
-void Order::generateClientOrderUUID() {
-    if (!clientOrderUUID.empty()) {
+void Order::initialize_timestamps() {
+    auto now = std::chrono::high_resolution_clock::now();
+    std::int64_t nanos = now.time_since_epoch().count();
+    timestamp = nanos;
+    updated_at = nanos;
+}
+
+void Order::update_timestamp() {
+    auto now = std::chrono::high_resolution_clock::now();
+    updated_at = now.time_since_epoch().count();
+}
+
+void Order::generate_client_order_uuid() {
+    if (!client_order_uuid.empty()) {
         return; // Already has UUID
     }
     
     // Generate a simple UUID-like string
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis;
+    std::uniform_int_distribution<std::uint32_t> dis;
     
     std::stringstream ss;
     ss << std::hex 
@@ -28,68 +54,105 @@ void Order::generateClientOrderUUID() {
        << (dis(gen) & 0xFFFF) << "-" 
        << dis(gen) << dis(gen);
     
-    clientOrderUUID = ss.str();
+    client_order_uuid = ss.str();
 }
 
-bool Order::validate() const {
-    // Basic validation checks
-    if (id.empty()) return false;
-    if (baseToken.empty() || quoteToken.empty()) return false;
-    if (side != "BUY" && side != "SELL") return false;
-    if (quantity <= 0.0) return false;
+std::vector<std::string> Order::validate() const {
+    std::vector<std::string> errors;
+    
+    if (id.empty()) {
+        errors.push_back("Order ID is required");
+    }
+    
+    if (base_token.empty()) {
+        errors.push_back("Base token is required");
+    }
+    
+    if (quote_token.empty()) {
+        errors.push_back("Quote token is required");
+    }
+    
+    if (!OrderUtils::is_valid_side(side)) {
+        errors.push_back("Side must be 'BUY' or 'SELL'");
+    }
+    
+    if (quantity <= 0.0) {
+        errors.push_back("Quantity must be positive");
+    }
+    
+    if (!OrderUtils::is_valid_order_type(order_type)) {
+        errors.push_back("Invalid order type: " + order_type);
+    }
     
     // Order type specific validation
-    if (orderType == "LIMIT" && limitPrice <= 0.0) return false;
-    if (orderType == "STOP" && !stopPrice.has_value()) return false;
-    if (orderType == "STOP_LIMIT" && (!stopPrice.has_value() || limitPrice <= 0.0)) return false;
+    if (order_type == "LIMIT" && limit_price <= 0.0) {
+        errors.push_back("Limit price must be positive for LIMIT orders");
+    }
     
-    // Time in force validation
-    if (tif != "GTC" && tif != "IOC" && tif != "FOK" && tif != "DAY" && tif != "GTD") return false;
-    if (tif == "GTD" && !expiryTimestamp.has_value()) return false;
+    if (order_type == "STOP" && (!stop_price.has_value() || stop_price.value() <= 0.0)) {
+        errors.push_back("Stop price must be positive for STOP orders");
+    }
     
-    return true;
+    if (order_type == "STOP_LIMIT") {
+        if (!stop_price.has_value() || stop_price.value() <= 0.0) {
+            errors.push_back("Stop price must be positive for STOP_LIMIT orders");
+        }
+        if (limit_price <= 0.0) {
+            errors.push_back("Limit price must be positive for STOP_LIMIT orders");
+        }
+    }
+    
+    if (!OrderUtils::is_valid_time_in_force(time_in_force)) {
+        errors.push_back("Invalid time in force: " + time_in_force);
+    }
+    
+    if (time_in_force == "GTD" && !expiry_timestamp.has_value()) {
+        errors.push_back("Expiry timestamp required for GTD orders");
+    }
+    
+    return errors;
 }
 
-std::string Order::toJsonString() const {
+std::string Order::to_json() const {
     Json::Value json;
     
     json["id"] = id;
-    json["base_token"] = baseToken;
-    json["quote_token"] = quoteToken;
+    json["base_token"] = base_token;
+    json["quote_token"] = quote_token;
     json["side"] = side;
     json["quantity"] = quantity;
-    json["quantity_token"] = quantityToken;
-    json["limit_price"] = limitPrice;
-    json["limit_price_token"] = limitPriceToken;
-    json["customer_id"] = customerID;
-    json["user_id"] = userID;
-    json["account_id"] = accountID;
+    json["quantity_token"] = quantity_token;
+    json["limit_price"] = limit_price;
+    json["limit_price_token"] = limit_price_token;
+    json["customer_id"] = static_cast<Json::Int64>(customer_id);
+    json["user_id"] = static_cast<Json::Int64>(user_id);
+    json["account_id"] = static_cast<Json::Int64>(account_id);
     json["status"] = status;
-    json["order_type"] = orderType;
-    json["timestamp"] = timestamp;
-    json["updated_at"] = updatedAt;
-    json["client_order_uuid"] = clientOrderUUID;
-    json["time_in_force"] = tif;
-    json["request_source"] = requestSource;
-    json["request_channel"] = requestChannel;
-    json["base_token_usd_conversion_rate"] = baseTokenUsdConversionRate;
-    json["quote_token_usd_conversion_rate"] = quoteTokenUsdConversionRate;
+    json["order_type"] = order_type;
+    json["timestamp"] = static_cast<Json::Int64>(timestamp);
+    json["updated_at"] = static_cast<Json::Int64>(updated_at);
+    json["client_order_uuid"] = client_order_uuid;
+    json["time_in_force"] = time_in_force;
+    json["request_source"] = request_source;
+    json["request_channel"] = request_channel;
+    json["base_token_usd_rate"] = base_token_usd_rate;
+    json["quote_token_usd_rate"] = quote_token_usd_rate;
     
-    if (stopPrice.has_value()) {
-        json["stop_price"] = stopPrice.value();
+    if (stop_price.has_value()) {
+        json["stop_price"] = stop_price.value();
     }
     
-    if (expiryTimestamp.has_value()) {
-        json["expiry_timestamp"] = expiryTimestamp.value();
+    if (expiry_timestamp.has_value()) {
+        json["expiry_timestamp"] = static_cast<Json::Int64>(expiry_timestamp.value());
     }
     
     // Add metadata
     if (!metadata.empty()) {
-        Json::Value metadataJson;
+        Json::Value metadata_json;
         for (const auto& pair : metadata) {
-            metadataJson[pair.first] = pair.second;
+            metadata_json[pair.first] = pair.second;
         }
-        json["metadata"] = metadataJson;
+        json["metadata"] = metadata_json;
     }
     
     Json::StreamWriterBuilder builder;
@@ -97,11 +160,11 @@ std::string Order::toJsonString() const {
     return Json::writeString(builder, json);
 }
 
-Order Order::fromJsonString(const std::string& jsonStr) {
+Order Order::from_json(const std::string& json_str) {
     Json::Reader reader;
     Json::Value root;
     
-    if (!reader.parse(jsonStr, root)) {
+    if (!reader.parse(json_str, root)) {
         throw std::runtime_error("Failed to parse JSON: " + reader.getFormattedErrorMessages());
     }
     
@@ -109,59 +172,71 @@ Order Order::fromJsonString(const std::string& jsonStr) {
     
     // Required fields
     order.id = root.get("id", "").asString();
-    order.baseToken = root.get("base_token", "").asString();
-    order.quoteToken = root.get("quote_token", "").asString();
+    order.base_token = root.get("base_token", "").asString();
+    order.quote_token = root.get("quote_token", "").asString();
     order.side = root.get("side", "").asString();
     order.quantity = root.get("quantity", 0.0).asDouble();
-    order.orderType = root.get("order_type", "LIMIT").asString();
+    order.order_type = root.get("order_type", "LIMIT").asString();
     
     // Optional fields with defaults
-    order.quantityToken = root.get("quantity_token", order.baseToken).asString();
-    order.limitPrice = root.get("limit_price", 0.0).asDouble();
-    order.limitPriceToken = root.get("limit_price_token", order.quoteToken).asString();
-    order.customerID = root.get("customer_id", 0).asInt64();
-    order.userID = root.get("user_id", 0).asInt64();
-    order.accountID = root.get("account_id", 0).asInt64();
+    order.quantity_token = root.get("quantity_token", order.base_token).asString();
+    order.limit_price = root.get("limit_price", 0.0).asDouble();
+    order.limit_price_token = root.get("limit_price_token", order.quote_token).asString();
+    order.customer_id = root.get("customer_id", 0).asInt64();
+    order.user_id = root.get("user_id", 0).asInt64();
+    order.account_id = root.get("account_id", 0).asInt64();
     order.status = root.get("status", "CREATED").asString();
     order.timestamp = root.get("timestamp", 0).asInt64();
-    order.updatedAt = root.get("updated_at", 0).asInt64();
-    order.clientOrderUUID = root.get("client_order_uuid", "").asString();
-    order.tif = root.get("time_in_force", "GTC").asString();
-    order.requestSource = root.get("request_source", "API").asString();
-    order.requestChannel = root.get("request_channel", "cpp_client").asString();
-    order.baseTokenUsdConversionRate = root.get("base_token_usd_conversion_rate", 0.0).asDouble();
-    order.quoteTokenUsdConversionRate = root.get("quote_token_usd_conversion_rate", 1.0).asDouble();
+    order.updated_at = root.get("updated_at", 0).asInt64();
+    order.client_order_uuid = root.get("client_order_uuid", "").asString();
+    order.time_in_force = root.get("time_in_force", "GTC").asString();
+    order.request_source = root.get("request_source", "API").asString();
+    order.request_channel = root.get("request_channel", "cpp_client").asString();
+    order.base_token_usd_rate = root.get("base_token_usd_rate", 0.0).asDouble();
+    order.quote_token_usd_rate = root.get("quote_token_usd_rate", 1.0).asDouble();
     
     // Optional fields
     if (root.isMember("stop_price") && !root["stop_price"].isNull()) {
-        order.stopPrice = root["stop_price"].asDouble();
+        order.stop_price = root["stop_price"].asDouble();
     }
     
     if (root.isMember("expiry_timestamp") && !root["expiry_timestamp"].isNull()) {
-        order.expiryTimestamp = root["expiry_timestamp"].asInt64();
+        order.expiry_timestamp = root["expiry_timestamp"].asInt64();
     }
     
     // Metadata
     if (root.isMember("metadata") && root["metadata"].isObject()) {
-        const Json::Value& metadataJson = root["metadata"];
-        for (const auto& key : metadataJson.getMemberNames()) {
-            order.metadata[key] = metadataJson[key].asString();
+        const Json::Value& metadata_json = root["metadata"];
+        for (const auto& key : metadata_json.getMemberNames()) {
+            order.metadata[key] = metadata_json[key].asString();
         }
     }
     
     return order;
 }
 
-// Portfolio implementation
+double Order::calculate_notional_value() const {
+    if (order_type == "MARKET") {
+        // For market orders, we can't calculate exact notional without market price
+        return 0.0;
+    } else if (order_type == "LIMIT" || order_type == "STOP_LIMIT") {
+        return quantity * limit_price;
+    } else if (order_type == "STOP" && stop_price.has_value()) {
+        return quantity * stop_price.value();
+    }
+    
+    return 0.0;
+}
 
-const Balance* Portfolio::getBalance(const std::string& token) const {
+// Portfolio implementation
+const Balance* Portfolio::get_balance(const std::string& token) const {
     auto it = std::find_if(balances.begin(), balances.end(),
         [&token](const Balance& b) { return b.token == token; });
     
     return (it != balances.end()) ? &(*it) : nullptr;
 }
 
-void Portfolio::updateBalance(const Balance& balance) {
+void Portfolio::update_balance(const Balance& balance) {
     auto it = std::find_if(balances.begin(), balances.end(),
         [&balance](const Balance& b) { return b.token == balance.token; });
     
@@ -171,277 +246,209 @@ void Portfolio::updateBalance(const Balance& balance) {
         balances.push_back(balance);
     }
     
-    // Recalculate total USD value
-    totalUsdValue = 0.0;
-    for (const auto& bal : balances) {
-        totalUsdValue += bal.usdValue;
+    recalculate_total_value();
+    timestamp = OrderUtils::get_current_timestamp_nanos();
+}
+
+bool Portfolio::remove_balance(const std::string& token) {
+    auto it = std::find_if(balances.begin(), balances.end(),
+        [&token](const Balance& b) { return b.token == token; });
+    
+    if (it != balances.end()) {
+        balances.erase(it);
+        recalculate_total_value();
+        return true;
     }
     
-    timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    return false;
+}
+
+std::vector<std::string> Portfolio::get_tokens() const {
+    std::vector<std::string> tokens;
+    tokens.reserve(balances.size());
+    
+    for (const auto& balance : balances) {
+        tokens.push_back(balance.token);
+    }
+    
+    return tokens;
+}
+
+bool Portfolio::can_place_order(const Order& order) const {
+    if (order.is_buy()) {
+        // For buy orders, need quote token balance
+        const Balance* balance = get_balance(order.quote_token);
+        if (!balance) return false;
+        
+        double required = order.calculate_notional_value();
+        return balance->is_sufficient(required);
+    } else {
+        // For sell orders, need base token balance
+        const Balance* balance = get_balance(order.base_token);
+        if (!balance) return false;
+        
+        return balance->is_sufficient(order.quantity);
+    }
+}
+
+void Portfolio::recalculate_total_value() {
+    total_usd_value = 0.0;
+    for (const auto& balance : balances) {
+        total_usd_value += balance.usd_value;
+    }
 }
 
 // OrderFactory implementation
-
 namespace OrderFactory {
 
-Order createMarketBuyOrder(const std::string& baseToken,
-                          const std::string& quoteToken,
-                          double quantity,
-                          int64_t accountId) {
-    Order order;
-    order.id = OrderUtils::generateOrderId("market_buy");
-    order.baseToken = baseToken;
-    order.quoteToken = quoteToken;
-    order.side = "BUY";
-    order.quantity = quantity;
-    order.quantityToken = baseToken;
-    order.orderType = "MARKET";
-    order.accountID = accountId;
-    order.status = "CREATED";
-    order.tif = "IOC"; // Market orders are typically IOC
-    order.initializeTimestamps();
-    order.generateClientOrderUUID();
+std::unique_ptr<Order> create_market_buy(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    std::int64_t account_id) {
     
+    auto order = std::make_unique<Order>(base_token, quote_token, "BUY", quantity, "MARKET");
+    order->id = OrderUtils::generate_order_id("market_buy");
+    order->account_id = account_id;
+    order->time_in_force = "IOC"; // Market orders are typically IOC
     return order;
 }
 
-Order createMarketSellOrder(const std::string& baseToken,
-                           const std::string& quoteToken,
-                           double quantity,
-                           int64_t accountId) {
-    Order order;
-    order.id = OrderUtils::generateOrderId("market_sell");
-    order.baseToken = baseToken;
-    order.quoteToken = quoteToken;
-    order.side = "SELL";
-    order.quantity = quantity;
-    order.quantityToken = baseToken;
-    order.orderType = "MARKET";
-    order.accountID = accountId;
-    order.status = "CREATED";
-    order.tif = "IOC"; // Market orders are typically IOC
-    order.initializeTimestamps();
-    order.generateClientOrderUUID();
+std::unique_ptr<Order> create_market_sell(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    std::int64_t account_id) {
     
+    auto order = std::make_unique<Order>(base_token, quote_token, "SELL", quantity, "MARKET");
+    order->id = OrderUtils::generate_order_id("market_sell");
+    order->account_id = account_id;
+    order->time_in_force = "IOC"; // Market orders are typically IOC
     return order;
 }
 
-Order createLimitBuyOrder(const std::string& baseToken,
-                         const std::string& quoteToken,
-                         double quantity,
-                         double limitPrice,
-                         int64_t accountId) {
-    Order order;
-    order.id = OrderUtils::generateOrderId("limit_buy");
-    order.baseToken = baseToken;
-    order.quoteToken = quoteToken;
-    order.side = "BUY";
-    order.quantity = quantity;
-    order.quantityToken = baseToken;
-    order.limitPrice = limitPrice;
-    order.limitPriceToken = quoteToken;
-    order.orderType = "LIMIT";
-    order.accountID = accountId;
-    order.status = "CREATED";
-    order.tif = "GTC";
-    order.initializeTimestamps();
-    order.generateClientOrderUUID();
+std::unique_ptr<Order> create_limit_buy(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double limit_price,
+    std::int64_t account_id) {
     
+    auto order = std::make_unique<Order>(base_token, quote_token, "BUY", quantity, "LIMIT");
+    order->id = OrderUtils::generate_order_id("limit_buy");
+    order->limit_price = limit_price;
+    order->account_id = account_id;
+    order->time_in_force = "GTC";
     return order;
 }
 
-Order createLimitSellOrder(const std::string& baseToken,
-                          const std::string& quoteToken,
-                          double quantity,
-                          double limitPrice,
-                          int64_t accountId) {
-    Order order;
-    order.id = OrderUtils::generateOrderId("limit_sell");
-    order.baseToken = baseToken;
-    order.quoteToken = quoteToken;
-    order.side = "SELL";
-    order.quantity = quantity;
-    order.quantityToken = baseToken;
-    order.limitPrice = limitPrice;
-    order.limitPriceToken = quoteToken;
-    order.orderType = "LIMIT";
-    order.accountID = accountId;
-    order.status = "CREATED";
-    order.tif = "GTC";
-    order.initializeTimestamps();
-    order.generateClientOrderUUID();
+std::unique_ptr<Order> create_limit_sell(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double limit_price,
+    std::int64_t account_id) {
     
+    auto order = std::make_unique<Order>(base_token, quote_token, "SELL", quantity, "LIMIT");
+    order->id = OrderUtils::generate_order_id("limit_sell");
+    order->limit_price = limit_price;
+    order->account_id = account_id;
+    order->time_in_force = "GTC";
     return order;
 }
 
-Order createStopLossOrder(const std::string& baseToken,
-                         const std::string& quoteToken,
-                         double quantity,
-                         double stopPrice,
-                         int64_t accountId) {
-    Order order;
-    order.id = OrderUtils::generateOrderId("stop_loss");
-    order.baseToken = baseToken;
-    order.quoteToken = quoteToken;
-    order.side = "SELL"; // Stop loss is typically a sell order
-    order.quantity = quantity;
-    order.quantityToken = baseToken;
-    order.stopPrice = stopPrice;
-    order.orderType = "STOP";
-    order.accountID = accountId;
-    order.status = "CREATED";
-    order.tif = "GTC";
-    order.initializeTimestamps();
-    order.generateClientOrderUUID();
+std::unique_ptr<Order> create_stop_loss(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double stop_price,
+    std::int64_t account_id) {
     
+    auto order = std::make_unique<Order>(base_token, quote_token, "SELL", quantity, "STOP");
+    order->id = OrderUtils::generate_order_id("stop_loss");
+    order->stop_price = stop_price;
+    order->account_id = account_id;
+    order->time_in_force = "GTC";
     return order;
 }
 
-Order createStopLimitOrder(const std::string& baseToken,
-                          const std::string& quoteToken,
-                          double quantity,
-                          double stopPrice,
-                          double limitPrice,
-                          int64_t accountId) {
-    Order order;
-    order.id = OrderUtils::generateOrderId("stop_limit");
-    order.baseToken = baseToken;
-    order.quoteToken = quoteToken;
-    order.side = "SELL"; // Stop limit is typically a sell order
-    order.quantity = quantity;
-    order.quantityToken = baseToken;
-    order.stopPrice = stopPrice;
-    order.limitPrice = limitPrice;
-    order.limitPriceToken = quoteToken;
-    order.orderType = "STOP_LIMIT";
-    order.accountID = accountId;
-    order.status = "CREATED";
-    order.tif = "GTC";
-    order.initializeTimestamps();
-    order.generateClientOrderUUID();
+std::unique_ptr<Order> create_stop_limit(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double stop_price,
+    double limit_price,
+    std::int64_t account_id) {
     
+    auto order = std::make_unique<Order>(base_token, quote_token, "SELL", quantity, "STOP_LIMIT");
+    order->id = OrderUtils::generate_order_id("stop_limit");
+    order->stop_price = stop_price;
+    order->limit_price = limit_price;
+    order->account_id = account_id;
+    order->time_in_force = "GTC";
     return order;
 }
 
 } // namespace OrderFactory
 
 // OrderUtils implementation
-
 namespace OrderUtils {
 
-std::vector<std::string> validateOrder(const Order& order) {
-    std::vector<std::string> errors;
-    
-    if (order.id.empty()) {
-        errors.push_back("Order ID is required");
-    }
-    
-    if (order.baseToken.empty()) {
-        errors.push_back("Base token is required");
-    }
-    
-    if (order.quoteToken.empty()) {
-        errors.push_back("Quote token is required");
-    }
-    
-    if (order.side != "BUY" && order.side != "SELL") {
-        errors.push_back("Side must be 'BUY' or 'SELL'");
-    }
-    
-    if (order.quantity <= 0.0) {
-        errors.push_back("Quantity must be positive");
-    }
-    
-    // Order type specific validation
-    if (order.orderType == "LIMIT") {
-        if (order.limitPrice <= 0.0) {
-            errors.push_back("Limit price must be positive for LIMIT orders");
-        }
-    } else if (order.orderType == "STOP") {
-        if (!order.stopPrice.has_value() || order.stopPrice.value() <= 0.0) {
-            errors.push_back("Stop price must be positive for STOP orders");
-        }
-    } else if (order.orderType == "STOP_LIMIT") {
-        if (!order.stopPrice.has_value() || order.stopPrice.value() <= 0.0) {
-            errors.push_back("Stop price must be positive for STOP_LIMIT orders");
-        }
-        if (order.limitPrice <= 0.0) {
-            errors.push_back("Limit price must be positive for STOP_LIMIT orders");
-        }
-    } else if (order.orderType != "MARKET") {
-        errors.push_back("Unknown order type: " + order.orderType);
-    }
-    
-    // Time in force validation
-    if (order.tif != "GTC" && order.tif != "IOC" && order.tif != "FOK" && order.tif != "DAY" && order.tif != "GTD") {
-        errors.push_back("Invalid time in force: " + order.tif);
-    }
-    
-    if (order.tif == "GTD" && !order.expiryTimestamp.has_value()) {
-        errors.push_back("Expiry timestamp required for GTD orders");
-    }
-    
-    // Price relationship validation for stop orders
-    if (order.orderType == "STOP_LIMIT" && order.stopPrice.has_value()) {
-        if (order.side == "BUY" && order.stopPrice.value() <= order.limitPrice) {
-            errors.push_back("For BUY stop-limit orders, stop price should be above limit price");
-        } else if (order.side == "SELL" && order.stopPrice.value() >= order.limitPrice) {
-            errors.push_back("For SELL stop-limit orders, stop price should be below limit price");
-        }
-    }
-    
-    return errors;
-}
-
-double calculateNotionalValue(const Order& order) {
-    if (order.orderType == "MARKET") {
-        // For market orders, we can't calculate exact notional without market price
-        return 0.0;
-    } else if (order.orderType == "LIMIT" || order.orderType == "STOP_LIMIT") {
-        return order.quantity * order.limitPrice;
-    } else if (order.orderType == "STOP" && order.stopPrice.has_value()) {
-        return order.quantity * order.stopPrice.value();
-    }
-    
-    return 0.0;
-}
-
-bool isBuyOrder(const Order& order) {
-    return order.side == "BUY";
-}
-
-bool isSellOrder(const Order& order) {
-    return order.side == "SELL";
-}
-
-bool isLimitOrder(const Order& order) {
-    return order.orderType == "LIMIT";
-}
-
-bool isMarketOrder(const Order& order) {
-    return order.orderType == "MARKET";
-}
-
-std::string generateOrderId(const std::string& prefix) {
+std::string generate_order_id(const std::string& prefix) {
     auto now = std::chrono::high_resolution_clock::now();
-    int64_t timestamp = now.time_since_epoch().count();
+    std::int64_t timestamp = now.time_since_epoch().count();
     
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis(1000, 9999);
+    std::uniform_int_distribution<std::uint32_t> dis(1000, 9999);
     
     return prefix + "_" + std::to_string(timestamp) + "_" + std::to_string(dis(gen));
 }
 
-std::string generateMessageId(const std::string& prefix) {
+std::string generate_message_id(const std::string& prefix) {
     auto now = std::chrono::high_resolution_clock::now();
-    int64_t timestamp = now.time_since_epoch().count();
+    std::int64_t timestamp = now.time_since_epoch().count();
     
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis(10000, 99999);
+    std::uniform_int_distribution<std::uint32_t> dis(10000, 99999);
     
     return prefix + "_" + std::to_string(timestamp) + "_" + std::to_string(dis(gen));
+}
+
+std::string generate_uuid() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<std::uint32_t> dis;
+    
+    std::stringstream ss;
+    ss << std::hex 
+       << dis(gen) << "-" 
+       << (dis(gen) & 0xFFFF) << "-" 
+       << (4000 | (dis(gen) & 0x0FFF)) << "-" // Version 4 UUID
+       << (0x8000 | (dis(gen) & 0x3FFF)) << "-" // Variant bits
+       << dis(gen) << (dis(gen) & 0xFFFF);
+    
+    return ss.str();
+}
+
+bool is_valid_side(const std::string& side) {
+    return side == "BUY" || side == "SELL";
+}
+
+bool is_valid_order_type(const std::string& order_type) {
+    return order_type == "MARKET" || order_type == "LIMIT" || 
+           order_type == "STOP" || order_type == "STOP_LIMIT";
+}
+
+bool is_valid_time_in_force(const std::string& tif) {
+    return tif == "GTC" || tif == "IOC" || tif == "FOK" || 
+           tif == "DAY" || tif == "GTD";
+}
+
+std::int64_t get_current_timestamp_nanos() {
+    auto now = std::chrono::high_resolution_clock::now();
+    return now.time_since_epoch().count();
 }
 
 } // namespace OrderUtils

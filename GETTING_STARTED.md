@@ -120,8 +120,8 @@ The Aeron Cluster C++ Client provides:
 int main() {
     // Configure the client
     auto config = aeron_cluster::ClusterClientConfigBuilder()
-        .withClusterEndpoints({"localhost:9002", "localhost:9102", "localhost:9202"})
-        .withAeronDir("/dev/shm/aeron")
+        .with_cluster_endpoints({"localhost:9002", "localhost:9102", "localhost:9202"})
+        .with_aeron_dir("/dev/shm/aeron")
         .build();
     
     // Create and connect client
@@ -132,14 +132,14 @@ int main() {
     }
     
     // Create and publish an order
-    auto order = client.createSampleLimitOrder("ETH", "USDC", "BUY", 1.0, 3500.0);
-    std::string messageId = client.publishOrder(order);
+    auto order = client.create_sample_limit_order("ETH", "USDC", "BUY", 1.0, 3500.0);
+    std::string messageId = client.publish_order(order);
     
     std::cout << "Published order: " << messageId << std::endl;
     
     // Poll for responses
     while (true) {
-        int messages = client.pollMessages(10);
+        int messages = client.poll_messages(10);
         if (messages == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

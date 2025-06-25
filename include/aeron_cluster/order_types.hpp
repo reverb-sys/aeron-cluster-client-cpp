@@ -5,270 +5,168 @@
 #include <optional>
 #include <vector>
 #include <unordered_map>
+#include <memory>
+#include <cstdint>
 
 namespace aeron_cluster {
 
 /**
- * @brief Trading order structure matching cluster service expectations
- * 
- * This structure represents a complete trading order with all fields
- * that might be required by a financial trading cluster service.
+ * @brief Trading order structure for financial trading systems
  */
-struct Order {
-    /**
-     * @brief Unique order identifier
-     * 
-     * Should be unique across all orders for this client session.
-     * Typically UUID or timestamp-based identifier.
-     */
+class Order {
+public:
+    // Core order identification
     std::string id;
-
-    /**
-     * @brief Base token symbol (e.g., "ETH", "BTC")
-     */
-    std::string baseToken;
-
-    /**
-     * @brief Quote token symbol (e.g., "USDC", "USD")
-     */
-    std::string quoteToken;
-
-    /**
-     * @brief Order side: "BUY" or "SELL"
-     */
-    std::string side;
-
-    /**
-     * @brief Order quantity amount
-     */
+    std::string client_order_uuid;
+    
+    // Trading pair
+    std::string base_token;
+    std::string quote_token;
+    
+    // Order details
+    std::string side; // "BUY" or "SELL"
     double quantity = 0.0;
-
-    /**
-     * @brief Token symbol for the quantity (usually same as baseToken)
-     */
-    std::string quantityToken;
-
-    /**
-     * @brief Limit price (for LIMIT orders)
-     */
-    double limitPrice = 0.0;
-
-    /**
-     * @brief Token symbol for the limit price (usually same as quoteToken)
-     */
-    std::string limitPriceToken;
-
-    /**
-     * @brief Customer identifier
-     */
-    int64_t customerID = 0;
-
-    /**
-     * @brief User identifier
-     */
-    int64_t userID = 0;
-
-    /**
-     * @brief Account identifier
-     */
-    int64_t accountID = 0;
-
-    /**
-     * @brief Order status: "CREATED", "PENDING", "FILLED", "CANCELLED", etc.
-     */
+    std::string quantity_token;
+    
+    // Pricing
+    double limit_price = 0.0;
+    std::string limit_price_token;
+    std::optional<double> stop_price;
+    
+    // Account information
+    std::int64_t customer_id = 0;
+    std::int64_t user_id = 0;
+    std::int64_t account_id = 0;
+    
+    // Order state
     std::string status = "CREATED";
-
-    /**
-     * @brief Order type: "LIMIT", "MARKET", "STOP", "STOP_LIMIT"
-     */
-    std::string orderType = "LIMIT";
-
-    /**
-     * @brief Order creation timestamp (nanoseconds since epoch)
-     */
-    int64_t timestamp = 0;
-
-    /**
-     * @brief Last update timestamp (nanoseconds since epoch)
-     */
-    int64_t updatedAt = 0;
-
-    /**
-     * @brief Client-side order UUID for tracking
-     */
-    std::string clientOrderUUID;
-
-    /**
-     * @brief Time in force: "GTC", "IOC", "FOK", "DAY"
-     */
-    std::string tif = "GTC";
-
-    /**
-     * @brief Request source identifier (e.g., "API", "UI", "FIX")
-     */
-    std::string requestSource = "API";
-
-    /**
-     * @brief Request channel identifier
-     */
-    std::string requestChannel = "cpp_client";
-
-    /**
-     * @brief USD conversion rate for base token
-     */
-    double baseTokenUsdConversionRate = 0.0;
-
-    /**
-     * @brief USD conversion rate for quote token
-     */
-    double quoteTokenUsdConversionRate = 0.0;
-
-    /**
-     * @brief Stop price (for STOP and STOP_LIMIT orders)
-     */
-    std::optional<double> stopPrice;
-
-    /**
-     * @brief Expiry timestamp for GTD (Good Till Date) orders
-     */
-    std::optional<int64_t> expiryTimestamp;
-
-    /**
-     * @brief Additional order metadata as key-value pairs
-     */
+    std::string order_type = "LIMIT";
+    std::string time_in_force = "GTC";
+    
+    // Timestamps (nanoseconds since epoch)
+    std::int64_t timestamp = 0;
+    std::int64_t updated_at = 0;
+    std::optional<std::int64_t> expiry_timestamp;
+    
+    // Request tracking
+    std::string request_source = "API";
+    std::string request_channel = "cpp_client";
+    
+    // USD conversion rates
+    double base_token_usd_rate = 0.0;
+    double quote_token_usd_rate = 0.0;
+    
+    // Additional metadata
     std::unordered_map<std::string, std::string> metadata;
+
+    /**
+     * @brief Default constructor
+     */
+    Order() = default;
+
+    /**
+     * @brief Constructor with basic order parameters
+     */
+    Order(const std::string& base, const std::string& quote, 
+          const std::string& side, double qty, const std::string& type = "LIMIT");
 
     /**
      * @brief Initialize timestamps to current time
      */
-    void initializeTimestamps() {
-        auto now = std::chrono::high_resolution_clock::now();
-        int64_t nanos = now.time_since_epoch().count();
-        timestamp = nanos;
-        updatedAt = nanos;
-    }
+    void initialize_timestamps();
 
     /**
-     * @brief Update the updatedAt timestamp to current time
+     * @brief Update the updated_at timestamp
      */
-    void updateTimestamp() {
-        auto now = std::chrono::high_resolution_clock::now();
-        updatedAt = now.time_since_epoch().count();
-    }
+    void update_timestamp();
 
     /**
-     * @brief Generate a client order UUID if not already set
+     * @brief Generate a client order UUID if not set
      */
-    void generateClientOrderUUID();
+    void generate_client_order_uuid();
 
     /**
      * @brief Validate order fields for completeness and consistency
-     * @return true if order is valid, false otherwise
+     * @return Vector of validation errors (empty if valid)
      */
-    bool validate() const;
+    std::vector<std::string> validate() const;
 
     /**
-     * @brief Get order as JSON string for debugging
+     * @brief Check if order is valid
+     * @return true if order passes all validation checks
+     */
+    bool is_valid() const { return validate().empty(); }
+
+    /**
+     * @brief Serialize order to JSON string
      * @return JSON representation of the order
      */
-    std::string toJsonString() const;
+    std::string to_json() const;
 
     /**
-     * @brief Create order from JSON string
-     * @param jsonStr JSON string representation
+     * @brief Deserialize order from JSON string
+     * @param json_str JSON string representation
      * @return Order object parsed from JSON
      * @throws std::runtime_error on parsing errors
      */
-    static Order fromJsonString(const std::string& jsonStr);
+    static Order from_json(const std::string& json_str);
+
+    /**
+     * @brief Calculate notional value (quantity * price)
+     * @return Notional value in quote token units
+     */
+    double calculate_notional_value() const;
+
+    /**
+     * @brief Check if this is a buy order
+     */
+    bool is_buy() const { return side == "BUY"; }
+
+    /**
+     * @brief Check if this is a sell order
+     */
+    bool is_sell() const { return side == "SELL"; }
+
+    /**
+     * @brief Check if this is a limit order
+     */
+    bool is_limit() const { return order_type == "LIMIT"; }
+
+    /**
+     * @brief Check if this is a market order
+     */
+    bool is_market() const { return order_type == "MARKET"; }
+
+    /**
+     * @brief Check if this is a stop order
+     */
+    bool is_stop() const { return order_type == "STOP" || order_type == "STOP_LIMIT"; }
 };
 
 /**
  * @brief Order execution report from cluster
  */
 struct OrderExecutionReport {
-    /**
-     * @brief Original order ID
-     */
-    std::string orderId;
-
-    /**
-     * @brief Client order UUID for correlation
-     */
-    std::string clientOrderUUID;
-
-    /**
-     * @brief Execution ID for this fill
-     */
-    std::string executionId;
-
-    /**
-     * @brief Execution type: "NEW", "PARTIAL_FILL", "FILL", "CANCELLED", "REJECTED"
-     */
-    std::string executionType;
-
-    /**
-     * @brief Current order status
-     */
-    std::string orderStatus;
-
-    /**
-     * @brief Execution price
-     */
-    double executionPrice = 0.0;
-
-    /**
-     * @brief Executed quantity
-     */
-    double executedQuantity = 0.0;
-
-    /**
-     * @brief Remaining quantity
-     */
-    double remainingQuantity = 0.0;
-
-    /**
-     * @brief Cumulative executed quantity
-     */
-    double cumulativeQuantity = 0.0;
-
-    /**
-     * @brief Average execution price
-     */
-    double averagePrice = 0.0;
-
-    /**
-     * @brief Execution timestamp
-     */
-    int64_t executionTimestamp = 0;
-
-    /**
-     * @brief Commission charged
-     */
+    std::string order_id;
+    std::string client_order_uuid;
+    std::string execution_id;
+    std::string execution_type; // "NEW", "PARTIAL_FILL", "FILL", "CANCELLED", "REJECTED"
+    std::string order_status;
+    
+    double execution_price = 0.0;
+    double executed_quantity = 0.0;
+    double remaining_quantity = 0.0;
+    double cumulative_quantity = 0.0;
+    double average_price = 0.0;
+    
+    std::int64_t execution_timestamp = 0;
+    
     double commission = 0.0;
-
-    /**
-     * @brief Commission currency
-     */
-    std::string commissionCurrency;
-
-    /**
-     * @brief Rejection reason (if applicable)
-     */
-    std::string rejectReason;
-
-    /**
-     * @brief Trading venue/exchange identifier
-     */
+    std::string commission_currency;
+    std::string reject_reason;
     std::string venue;
-
-    /**
-     * @brief Counterparty information
-     */
     std::string counterparty;
-
-    /**
-     * @brief Additional execution metadata
-     */
+    
     std::unordered_map<std::string, std::string> metadata;
 };
 
@@ -276,128 +174,101 @@ struct OrderExecutionReport {
  * @brief Market data snapshot for a trading pair
  */
 struct MarketDataSnapshot {
-    /**
-     * @brief Trading pair symbol (e.g., "ETH-USDC")
-     */
     std::string symbol;
+    double bid_price = 0.0;
+    double ask_price = 0.0;
+    double bid_quantity = 0.0;
+    double ask_quantity = 0.0;
+    double last_price = 0.0;
+    double last_quantity = 0.0;
+    double volume_24h = 0.0;
+    double price_change_24h = 0.0;
+    std::int64_t timestamp = 0;
 
     /**
-     * @brief Best bid price
+     * @brief Get mid price (average of bid and ask)
      */
-    double bidPrice = 0.0;
+    double get_mid_price() const {
+        return (bid_price + ask_price) / 2.0;
+    }
 
     /**
-     * @brief Best ask price
+     * @brief Get spread
      */
-    double askPrice = 0.0;
+    double get_spread() const {
+        return ask_price - bid_price;
+    }
 
     /**
-     * @brief Best bid quantity
+     * @brief Get spread as percentage
      */
-    double bidQuantity = 0.0;
-
-    /**
-     * @brief Best ask quantity
-     */
-    double askQuantity = 0.0;
-
-    /**
-     * @brief Last trade price
-     */
-    double lastPrice = 0.0;
-
-    /**
-     * @brief Last trade quantity
-     */
-    double lastQuantity = 0.0;
-
-    /**
-     * @brief 24h volume
-     */
-    double volume24h = 0.0;
-
-    /**
-     * @brief 24h price change
-     */
-    double priceChange24h = 0.0;
-
-    /**
-     * @brief Timestamp of this snapshot
-     */
-    int64_t timestamp = 0;
+    double get_spread_percentage() const {
+        double mid = get_mid_price();
+        return mid > 0.0 ? (get_spread() / mid) * 100.0 : 0.0;
+    }
 };
 
 /**
  * @brief Portfolio balance information
  */
 struct Balance {
-    /**
-     * @brief Token symbol
-     */
     std::string token;
-
-    /**
-     * @brief Available balance (not in orders)
-     */
     double available = 0.0;
-
-    /**
-     * @brief Total balance (available + in orders)
-     */
     double total = 0.0;
+    double in_orders = 0.0;
+    double usd_value = 0.0;
+    std::int64_t last_updated = 0;
 
     /**
-     * @brief Amount currently in orders
+     * @brief Check if balance is sufficient for order
      */
-    double inOrders = 0.0;
-
-    /**
-     * @brief USD value of this balance
-     */
-    double usdValue = 0.0;
-
-    /**
-     * @brief Last update timestamp
-     */
-    int64_t lastUpdated = 0;
+    bool is_sufficient(double required_amount) const {
+        return available >= required_amount;
+    }
 };
 
 /**
  * @brief Portfolio snapshot with all balances
  */
-struct Portfolio {
-    /**
-     * @brief Account identifier
-     */
-    int64_t accountId = 0;
-
-    /**
-     * @brief All token balances
-     */
+class Portfolio {
+public:
+    std::int64_t account_id = 0;
     std::vector<Balance> balances;
-
-    /**
-     * @brief Total portfolio USD value
-     */
-    double totalUsdValue = 0.0;
-
-    /**
-     * @brief Portfolio snapshot timestamp
-     */
-    int64_t timestamp = 0;
+    double total_usd_value = 0.0;
+    std::int64_t timestamp = 0;
 
     /**
      * @brief Get balance for specific token
      * @param token Token symbol to find
      * @return Pointer to balance, or nullptr if not found
      */
-    const Balance* getBalance(const std::string& token) const;
+    const Balance* get_balance(const std::string& token) const;
 
     /**
      * @brief Update or add balance for a token
      * @param balance New balance information
      */
-    void updateBalance(const Balance& balance);
+    void update_balance(const Balance& balance);
+
+    /**
+     * @brief Remove balance for a token
+     * @param token Token to remove
+     * @return true if balance was found and removed
+     */
+    bool remove_balance(const std::string& token);
+
+    /**
+     * @brief Get all token symbols
+     */
+    std::vector<std::string> get_tokens() const;
+
+    /**
+     * @brief Check if portfolio has sufficient balance for order
+     */
+    bool can_place_order(const Order& order) const;
+
+private:
+    void recalculate_total_value();
 };
 
 /**
@@ -408,55 +279,61 @@ namespace OrderFactory {
 /**
  * @brief Create a market buy order
  */
-Order createMarketBuyOrder(const std::string& baseToken,
-                          const std::string& quoteToken,
-                          double quantity,
-                          int64_t accountId = 0);
+std::unique_ptr<Order> create_market_buy(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    std::int64_t account_id = 0);
 
 /**
  * @brief Create a market sell order
  */
-Order createMarketSellOrder(const std::string& baseToken,
-                           const std::string& quoteToken,
-                           double quantity,
-                           int64_t accountId = 0);
+std::unique_ptr<Order> create_market_sell(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    std::int64_t account_id = 0);
 
 /**
  * @brief Create a limit buy order
  */
-Order createLimitBuyOrder(const std::string& baseToken,
-                         const std::string& quoteToken,
-                         double quantity,
-                         double limitPrice,
-                         int64_t accountId = 0);
+std::unique_ptr<Order> create_limit_buy(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double limit_price,
+    std::int64_t account_id = 0);
 
 /**
  * @brief Create a limit sell order
  */
-Order createLimitSellOrder(const std::string& baseToken,
-                          const std::string& quoteToken,
-                          double quantity,
-                          double limitPrice,
-                          int64_t accountId = 0);
+std::unique_ptr<Order> create_limit_sell(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double limit_price,
+    std::int64_t account_id = 0);
 
 /**
  * @brief Create a stop loss order
  */
-Order createStopLossOrder(const std::string& baseToken,
-                         const std::string& quoteToken,
-                         double quantity,
-                         double stopPrice,
-                         int64_t accountId = 0);
+std::unique_ptr<Order> create_stop_loss(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double stop_price,
+    std::int64_t account_id = 0);
 
 /**
  * @brief Create a stop limit order
  */
-Order createStopLimitOrder(const std::string& baseToken,
-                          const std::string& quoteToken,
-                          double quantity,
-                          double stopPrice,
-                          double limitPrice,
-                          int64_t accountId = 0);
+std::unique_ptr<Order> create_stop_limit(
+    const std::string& base_token,
+    const std::string& quote_token,
+    double quantity,
+    double stop_price,
+    double limit_price,
+    std::int64_t account_id = 0);
 
 } // namespace OrderFactory
 
@@ -466,52 +343,51 @@ Order createStopLimitOrder(const std::string& baseToken,
 namespace OrderUtils {
 
 /**
- * @brief Validate order fields for common errors
- * @param order Order to validate
- * @return Vector of validation error messages (empty if valid)
- */
-std::vector<std::string> validateOrder(const Order& order);
-
-/**
- * @brief Calculate order notional value (quantity * price)
- * @param order Order to calculate for
- * @return Notional value in quote token units
- */
-double calculateNotionalValue(const Order& order);
-
-/**
- * @brief Check if order is a buy order
- */
-bool isBuyOrder(const Order& order);
-
-/**
- * @brief Check if order is a sell order
- */
-bool isSellOrder(const Order& order);
-
-/**
- * @brief Check if order is a limit order
- */
-bool isLimitOrder(const Order& order);
-
-/**
- * @brief Check if order is a market order
- */
-bool isMarketOrder(const Order& order);
-
-/**
  * @brief Generate a unique order ID
  * @param prefix Optional prefix for the ID
  * @return Unique order identifier
  */
-std::string generateOrderId(const std::string& prefix = "order");
+std::string generate_order_id(const std::string& prefix = "order");
 
 /**
  * @brief Generate a unique message ID for tracking
  * @param prefix Optional prefix for the ID
  * @return Unique message identifier
  */
-std::string generateMessageId(const std::string& prefix = "msg");
+std::string generate_message_id(const std::string& prefix = "msg");
+
+/**
+ * @brief Generate a UUID string
+ * @return UUID string
+ */
+std::string generate_uuid();
+
+/**
+ * @brief Validate order side
+ * @param side Order side to validate
+ * @return true if valid ("BUY" or "SELL")
+ */
+bool is_valid_side(const std::string& side);
+
+/**
+ * @brief Validate order type
+ * @param order_type Order type to validate
+ * @return true if valid
+ */
+bool is_valid_order_type(const std::string& order_type);
+
+/**
+ * @brief Validate time in force
+ * @param tif Time in force to validate
+ * @return true if valid
+ */
+bool is_valid_time_in_force(const std::string& tif);
+
+/**
+ * @brief Get current timestamp in nanoseconds
+ * @return Current timestamp
+ */
+std::int64_t get_current_timestamp_nanos();
 
 } // namespace OrderUtils
 

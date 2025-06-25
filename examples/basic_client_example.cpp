@@ -66,58 +66,6 @@ std::vector<std::string> parseEndpoints(const std::string& endpointList) {
     return endpoints;
 }
 
-int getAvailablePortInRange(int minPort = 40000, int maxPort = 59000) {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dist(minPort, maxPort);
-        std::set<int> tried;
-
-        while (tried.size() < (maxPort - minPort + 1)) {
-            int port = dist(gen);
-            if (tried.count(port)) continue;
-            tried.insert(port);
-
-            int sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sock < 0) continue;
-
-            sockaddr_in addr{};
-            addr.sin_family = AF_INET;
-            addr.sin_addr.s_addr = INADDR_ANY;
-            addr.sin_port = htons(port);
-
-            if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
-                close(sock);
-                return port;  // port is available
-            }
-
-            close(sock);
-        }
-
-        throw std::runtime_error("No available UDP port found in the range");
-    }
-
- std::string resolveEgressEndpoint(const std::string& channel) {
-        // Match hostnames (e.g., localhost), IPv4, and port numbers
-        std::regex pattern(R"(endpoint=([a-zA-Z0-9\.\-]+):(\d+))");
-        std::smatch match;
-
-        if (std::regex_search(channel, match, pattern)) {
-            std::string host = match[1].str();
-            std::string portStr = match[2].str();
-            int port = std::stoi(portStr);
-
-            if (port == 0) {
-                int newPort = getAvailablePortInRange();
-                std::string newEndpoint = "endpoint=" + host + ":" + std::to_string(newPort);
-                return std::regex_replace(channel, pattern, newEndpoint);
-            } else {
-                return channel;
-            }
-        } else {
-            throw std::invalid_argument("Channel endpoint is not in the correct format: expected 'endpoint=HOST:PORT'");
-        }
-    }
-
 // FIXED: Add pre-flight checks
 bool performPreflightChecks(const std::string& aeronDir, const std::vector<std::string>& endpoints) {
     std::cout << "🔍 Performing pre-flight checks..." << std::endl;
@@ -130,12 +78,6 @@ bool performPreflightChecks(const std::string& aeronDir, const std::vector<std::
     
     if (!aeronRunning) {
         std::cout << "❌ Aeron Media Driver not detected" << std::endl;
-        std::cout << "   Expected CnC file: " << cncFile << std::endl;
-        std::cout << "💡 To start Aeron Media Driver:" << std::endl;
-        std::cout << "   1. Download Aeron: https://github.com/real-logic/aeron/releases" << std::endl;
-        std::cout << "   2. Start Media Driver:" << std::endl;
-        std::cout << "      java -cp aeron-all-X.X.X.jar io.aeron.driver.MediaDriver" << std::endl;
-        std::cout << "   3. Or specify different directory with --aeron-dir" << std::endl;
         return false;
     }
     std::cout << "✅ Aeron Media Driver detected at: " << aeronDir << std::endl;
@@ -146,10 +88,6 @@ bool performPreflightChecks(const std::string& aeronDir, const std::vector<std::
     for (const auto& endpoint : endpoints) {
         std::cout << "   • " << endpoint << std::endl;
     }
-    std::cout << std::endl;
-    std::cout << "💡 To start a test cluster:" << std::endl;
-    std::cout << "   java -cp aeron-all-X.X.X.jar io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService" << std::endl;
-    std::cout << std::endl;
     
     return true;
 }
@@ -164,10 +102,10 @@ bool testClusterConnectivity(const std::vector<std::string>& endpoints,
     try {
         // Create minimal configuration for connectivity test
         auto config = ClusterClientConfigBuilder()
-            .withClusterEndpoints(endpoints)
-            .withAeronDir(aeronDir)
-            .withResponseTimeout(std::chrono::milliseconds(timeoutMs))
-            .withMaxRetries(1) // Only one retry for quick test
+            .with_cluster_endpoints(endpoints)
+            .with_aeron_dir(aeronDir)
+            .with_response_timeout(std::chrono::milliseconds(timeoutMs))
+            .with_max_retries(1) // Only one retry for quick test
             .build();
         
         config.debug_logging = debugMode;
@@ -184,8 +122,8 @@ bool testClusterConnectivity(const std::vector<std::string>& endpoints,
         
         if (connected) {
             std::cout << "✅ Successfully connected to cluster!" << std::endl;
-            std::cout << "   Session ID: " << testClient.getSessionId() << std::endl;
-            std::cout << "   Leader Member: " << testClient.getLeaderMemberId() << std::endl;
+            std::cout << "   Session ID: " << testClient.get_session_id() << std::endl;
+            std::cout << "   Leader Member: " << testClient.get_leader_member_id() << std::endl;
             
             // Disconnect cleanly
             testClient.disconnect();
@@ -268,32 +206,12 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // FIXED: Test connectivity first
-        if (!testClusterConnectivity(clusterEndpoints, aeronDir, connectionTimeout, debugMode)) {
-            std::cout << std::endl;
-            std::cout << "🔧 Troubleshooting Steps:" << std::endl;
-            std::cout << "1. Verify Aeron Cluster is running:" << std::endl;
-            std::cout << "   java -cp aeron-all-X.X.X.jar io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService" << std::endl;
-            std::cout << "2. Check network connectivity:" << std::endl;
-            std::cout << "   netstat -tlnp | grep -E \"(9002|9102|9202)\"" << std::endl;
-            std::cout << "3. Verify firewall allows UDP traffic on cluster ports" << std::endl;
-            std::cout << "4. Check Aeron Media Driver is running and accessible" << std::endl;
-            std::cout << "5. Try with --debug flag for more detailed information" << std::endl;
-            return 1;
-        }
-        
-        // If check-only mode, exit successfully after connectivity test
-        if (checkOnly) {
-            std::cout << "🎉 Cluster connectivity check completed successfully!" << std::endl;
-            return 0;
-        }
-        
         // Create client configuration with proper timeout
         auto config = ClusterClientConfigBuilder()
-            .withClusterEndpoints(clusterEndpoints)
-            .withAeronDir(aeronDir)
-            .withResponseTimeout(std::chrono::milliseconds(connectionTimeout))
-            .withMaxRetries(3)
+            .with_cluster_endpoints(clusterEndpoints)
+            .with_aeron_dir(aeronDir)
+            .with_response_timeout(std::chrono::milliseconds(connectionTimeout))
+            .with_max_retries(3)
             .build();
         
         // Enable debug mode if requested
@@ -301,9 +219,7 @@ int main(int argc, char* argv[]) {
         config.enable_console_info = true;
         config.enable_console_warnings = true;
         config.enable_console_errors = true;
-        // config.response_channel = "aeron:udp?endpoint=10.37.47.181:0"; // Default response channel
-        config.response_channel = resolveEgressEndpoint("aeron:udp?endpoint=10.37.47.181:0");
-        
+
         // Create the client
         ClusterClient client(config);
         
@@ -311,26 +227,31 @@ int main(int argc, char* argv[]) {
         int acknowledgedOrders = 0;
         int failedOrders = 0;
         
-        client.setMessageCallback([&](const std::string& messageType, 
-                                     const std::string& payload, 
-                                     const std::string& headers) {
-            if (messageType.find("ACK") != std::string::npos || 
-                messageType.find("ACKNOWLEDGMENT") != std::string::npos) {
-                
+        client.set_message_callback([&](const aeron_cluster::ParseResult& result) {
+            if (result.message_type.find("ACK") != std::string::npos || 
+                result.message_type.find("ACKNOWLEDGMENT") != std::string::npos) {
+
                 // Parse the acknowledgment
-                if (payload.find("\"success\":true") != std::string::npos ||
-                    payload.find("\"status\":\"success\"") != std::string::npos) {
+                if (result.payload.find("\"success\":true") != std::string::npos ||
+                    result.payload.find("\"status\":\"success\"") != std::string::npos) {
                     acknowledgedOrders++;
                     std::cout << "✅ Order acknowledged (" << acknowledgedOrders << "/" << orderCount << ")" << std::endl;
                 } else {
                     failedOrders++;
                     std::cout << "❌ Order failed (" << failedOrders << " total failures)" << std::endl;
                     if (debugMode) {
-                        std::cout << "   Failure details: " << payload.substr(0, 200) << std::endl;
+                        std::cout << "   Failure details: " << result.payload.substr(0, 200) << std::endl;
                     }
                 }
             } else if (debugMode) {
-                std::cout << "📨 Received message type: " << messageType << std::endl;
+                // print all result
+                std::cout << "📨 Received message type: " << result.message_type << std::endl;
+                std::cout << "📨 Received message payload: " << result.payload.substr(0, 200) << std::endl;
+                std::cout << " Received message ID: " << result.message_id.substr(0, 12) << "..." << std::endl;
+                std::cout << "   Received message Timestamp: " << result.timestamp << std::endl;
+                std::cout << "   Correlation ID: " << result.correlation_id << std::endl;
+                // std::cout << "   Received message header: " << result.header << std::endl;
+                std::cout << "   Received message length: " << result.payload.length() << " bytes" << std::endl;
             }
         });
         
@@ -343,8 +264,8 @@ int main(int argc, char* argv[]) {
         }
         
         std::cout << "🎉 Successfully connected to cluster!" << std::endl;
-        std::cout << "   Session ID: " << client.getSessionId() << std::endl;
-        std::cout << "   Leader Member: " << client.getLeaderMemberId() << std::endl;
+        std::cout << "   Session ID: " << client.get_session_id() << std::endl;
+        std::cout << "   Leader Member: " << client.get_leader_member_id() << std::endl;
         std::cout << std::endl;
         
         // Publish test orders
@@ -358,15 +279,15 @@ int main(int argc, char* argv[]) {
                 double quantity = 1.0 + (i * 0.5);
                 double price = 3500.0 + (i * 50.0);
                 
-                Order order = ClusterClient::createSampleLimitOrder(
+                Order order = ClusterClient::create_sample_limit_order(
                     "ETH", "USDC", side, quantity, price);
                 
                 // Customize order for this example
-                order.accountID = 10000 + i;
-                order.customerID = 50000 + i;
-                
+                order.account_id = 10000 + i;
+                order.customer_id = 50000 + i;
+
                 // Publish the order
-                std::string messageId = client.publishOrder(order);
+                std::string messageId = client.publish_order(order);
                 publishedMessageIds.push_back(messageId);
                 
                 std::cout << "   Order " << (i + 1) << "/" << orderCount 
@@ -379,7 +300,7 @@ int main(int argc, char* argv[]) {
                 }
                 
                 // Poll for responses periodically
-                client.pollMessages(5);
+                client.poll_messages(5);
                 
             } catch (const std::exception& e) {
                 std::cerr << "❌ Failed to publish order " << (i + 1) << ": " << e.what() << std::endl;
@@ -396,7 +317,7 @@ int main(int argc, char* argv[]) {
         
         while (running && (acknowledgedOrders + failedOrders) < orderCount) {
             // Poll for messages
-            int messagesReceived = client.pollMessages(10);
+            int messagesReceived = client.poll_messages(10);
             
             // Check timeout
             auto elapsed = std::chrono::steady_clock::now() - waitStart;
@@ -416,7 +337,7 @@ int main(int argc, char* argv[]) {
         std::cout << "📊 Final Results:" << std::endl;
         std::cout << "=================" << std::endl;
         
-        ConnectionStats stats = client.getConnectionStats();
+        ConnectionStats stats = client.get_connection_stats();
         
         std::cout << "📤 Orders published: " << orderCount << std::endl;
         std::cout << "✅ Orders acknowledged: " << acknowledgedOrders << std::endl;
@@ -453,7 +374,7 @@ int main(int argc, char* argv[]) {
             auto extendedTimeout = std::chrono::seconds(10);
             
             while (running && (acknowledgedOrders + failedOrders) < orderCount) {
-                client.pollMessages(10);
+                client.poll_messages(10);
                 
                 auto elapsed = std::chrono::steady_clock::now() - extendedWaitStart;
                 if (elapsed > extendedTimeout) {

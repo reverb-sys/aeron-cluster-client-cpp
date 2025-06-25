@@ -102,16 +102,16 @@ void inspectMessage(const std::vector<uint8_t>& data, bool verbose) {
     // Print hex dump if verbose or small message
     if (verbose || data.size() <= 64) {
         std::cout << "📋 Hex Dump:" << std::endl;
-        SBEUtils::printHexDump(data.data(), data.size(), "  ");
+        SBEUtils::print_hex_dump(data.data(), data.size(), "  ");
         std::cout << std::endl;
     }
     
     // Check if it looks like a valid SBE message
-    if (!SBEUtils::isValidSBEMessage(data.data(), data.size())) {
+    if (!SBEUtils::is_valid_sbe_message(data.data(), data.size())) {
         std::cout << "⚠️  Warning: Data doesn't look like a valid SBE message" << std::endl;
         
         // Try to extract readable strings
-        auto strings = SBEUtils::extractReadableStrings(data.data(), data.size(), 3);
+        auto strings = SBEUtils::extract_readable_strings(data.data(), data.size(), 3);
         if (!strings.empty()) {
             std::cout << "📝 Readable strings found:" << std::endl;
             for (const auto& str : strings) {
@@ -123,45 +123,45 @@ void inspectMessage(const std::vector<uint8_t>& data, bool verbose) {
     }
     
     // Parse the message
-    ParseResult result = MessageParser::parseMessage(data.data(), data.size());
+    ParseResult result = MessageParser::parse_message(data.data(), data.size());
     
     std::cout << "📊 Parse Results:" << std::endl;
     std::cout << "  Success: " << (result.success ? "✅ Yes" : "❌ No") << std::endl;
     
     if (!result.success) {
-        std::cout << "  Error: " << result.errorMessage << std::endl;
+        std::cout << "  Error: " << result.error_message << std::endl;
         std::cout << std::endl;
         return;
     }
     
-    std::cout << "  Message Type: " << result.getDescription() << std::endl;
-    std::cout << "  Template ID: " << result.templateId << std::endl;
-    std::cout << "  Schema ID: " << result.schemaId << std::endl;
+    std::cout << "  Message Type: " << result.get_description() << std::endl;
+    std::cout << "  Template ID: " << result.template_id << std::endl;
+    std::cout << "  Schema ID: " << result.schema_id << std::endl;
     std::cout << "  Version: " << result.version << std::endl;
-    std::cout << "  Block Length: " << result.blockLength << std::endl;
+    std::cout << "  Block Length: " << result.block_length << std::endl;
     
     if (result.timestamp > 0) {
-        std::cout << "  Timestamp: " << SBEUtils::formatTimestamp(result.timestamp) << std::endl;
+        std::cout << "  Timestamp: " << SBEUtils::format_timestamp(result.timestamp) << std::endl;
     }
     
     std::cout << std::endl;
     
     // Message-specific details
-    if (result.isSessionEvent()) {
+    if (result.is_session_event()) {
         std::cout << "📨 Session Event Details:" << std::endl;
-        std::cout << "  Correlation ID: " << result.correlationId << std::endl;
-        std::cout << "  Session ID: " << result.sessionId << std::endl;
-        std::cout << "  Leader Member: " << result.leaderMemberId << std::endl;
-        std::cout << "  Event Code: " << result.eventCode 
-                 << " (" << SBEUtils::getSessionEventCodeString(result.eventCode) << ")" << std::endl;
+        std::cout << "  Correlation ID: " << result.correlation_id << std::endl;
+        std::cout << "  Session ID: " << result.session_id << std::endl;
+        std::cout << "  Leader Member: " << result.leader_member_id << std::endl;
+        std::cout << "  Event Code: " << result.event_code 
+                 << " (" << SBEUtils::get_session_event_code_string(result.event_code) << ")" << std::endl;
         
         if (!result.payload.empty()) {
             std::cout << "  Detail: " << result.payload << std::endl;
         }
-    } else if (result.isTopicMessage()) {
+    } else if (result.is_topic_message()) {
         std::cout << "📨 Topic Message Details:" << std::endl;
-        std::cout << "  Message Type: " << result.messageType << std::endl;
-        std::cout << "  Message ID: " << result.messageId << std::endl;
+        std::cout << "  Message Type: " << result.message_type << std::endl;
+        std::cout << "  Message ID: " << result.message_id << std::endl;
         
         if (!result.payload.empty()) {
             std::cout << "  Payload: " << result.payload.substr(0, 200);
@@ -174,9 +174,9 @@ void inspectMessage(const std::vector<uint8_t>& data, bool verbose) {
         if (!result.headers.empty()) {
             std::cout << "  Headers: " << result.headers << std::endl;
         }
-    } else if (result.isAcknowledgment()) {
+    } else if (result.is_acknowledgment()) {
         std::cout << "📨 Acknowledgment Details:" << std::endl;
-        std::cout << "  Message ID: " << result.messageId << std::endl;
+        std::cout << "  Message ID: " << result.message_id << std::endl;
         std::cout << "  Status: " << result.payload << std::endl;
         
         if (!result.headers.empty()) {
@@ -194,24 +194,24 @@ void testEncoding(bool verbose) {
     // Test 1: SessionConnectRequest
     std::cout << "Test 1: SessionConnectRequest" << std::endl;
     try {
-        int64_t correlationId = 123456789;
+        int64_t correlation_id = 123456789;
         int32_t responseStreamId = 102;
         std::string responseChannel = "aeron:udp?endpoint=localhost:44445";
         int32_t protocolVersion = 1;
         
-        auto encoded = SBEEncoder::encodeSessionConnectRequest(
-            correlationId, responseStreamId, responseChannel, protocolVersion);
+        auto encoded = SBEEncoder::encode_session_connect_request(
+            correlation_id, responseStreamId, responseChannel, protocolVersion);
         
         std::cout << "  ✅ Encoding successful (" << encoded.size() << " bytes)" << std::endl;
         
         if (verbose) {
             std::cout << "  Hex dump:" << std::endl;
-            SBEUtils::printHexDump(encoded.data(), encoded.size(), "    ");
+            SBEUtils::print_hex_dump(encoded.data(), encoded.size(), "    ");
         }
         
         // Try to parse it back
-        ParseResult result = MessageParser::parseMessage(encoded.data(), encoded.size());
-        if (result.success && result.isSessionEvent()) {
+        ParseResult result = MessageParser::parse_message(encoded.data(), encoded.size());
+        if (result.success && result.is_session_event()) {
             std::cout << "  ✅ Round-trip test failed - parsed as wrong type" << std::endl;
         } else {
             std::cout << "  ℹ️  Note: SessionConnectRequest can't be parsed as response message" << std::endl;
@@ -232,24 +232,24 @@ void testEncoding(bool verbose) {
         std::string payload = R"({"id":"order_123","side":"BUY","quantity":1.0})";
         std::string headers = R"({"messageId":"msg_12345_67890"})";
         
-        auto encoded = SBEEncoder::encodeTopicMessage(
+        auto encoded = SBEEncoder::encode_topic_message(
             topic, messageType, uuid, payload, headers);
         
         std::cout << "  ✅ Encoding successful (" << encoded.size() << " bytes)" << std::endl;
         
         if (verbose) {
             std::cout << "  Hex dump:" << std::endl;
-            SBEUtils::printHexDump(encoded.data(), encoded.size(), "    ");
+            SBEUtils::print_hex_dump(encoded.data(), encoded.size(), "    ");
         }
         
         // Try to parse it back
-        ParseResult result = MessageParser::parseMessage(encoded.data(), encoded.size());
-        if (result.success && result.isTopicMessage()) {
+        ParseResult result = MessageParser::parse_message(encoded.data(), encoded.size());
+        if (result.success && result.is_topic_message()) {
             std::cout << "  ✅ Round-trip test successful" << std::endl;
-            std::cout << "    Parsed message type: " << result.messageType << std::endl;
-            std::cout << "    Parsed message ID: " << result.messageId << std::endl;
+            std::cout << "    Parsed message type: " << result.message_type << std::endl;
+            std::cout << "    Parsed message ID: " << result.message_id << std::endl;
         } else {
-            std::cout << "  ❌ Round-trip test failed: " << result.errorMessage << std::endl;
+            std::cout << "  ❌ Round-trip test failed: " << result.error_message << std::endl;
         }
         
     } catch (const std::exception& e) {
@@ -267,10 +267,10 @@ void generateSampleMessage(const std::string& type, bool verbose) {
         std::vector<uint8_t> encoded;
         
         if (type == "session-connect") {
-            encoded = SBEEncoder::encodeSessionConnectRequest(
+            encoded = SBEEncoder::encode_session_connect_request(
                 987654321, 102, "aeron:udp?endpoint=localhost:0", 1);
         } else if (type == "topic") {
-            encoded = SBEEncoder::encodeTopicMessage(
+            encoded = SBEEncoder::encode_topic_message(
                 "orders", "CREATE_ORDER", "sample_msg_123",
                 R"({"id":"sample_order","side":"BUY","quantity":1.5,"price":3500.0})",
                 R"({"messageId":"sample_msg_123","timestamp":1234567890})");

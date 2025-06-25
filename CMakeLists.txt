@@ -132,6 +132,7 @@ add_library(aeron-cluster-cpp STATIC
     src/sbe_encoder.cpp
     src/session_manager.cpp
     src/message_handlers.cpp
+    src/config.cpp
     src/order_types.cpp  # <-- Added this missing file
 )
 

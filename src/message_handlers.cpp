@@ -1,4 +1,4 @@
-#include "message_handlers.hpp"
+#include "aeron_cluster/message_handlers.hpp"
 #include <iostream>
 
 namespace aeron_cluster {
@@ -9,9 +9,9 @@ public:
     
     void handleMessage(const ParseResult& result) {
         if (result.success) {
-            std::cout << "[MessageHandler] Handled message: " << result.messageType << std::endl;
+            std::cout << "[MessageHandler] Handled message: " << result.message_type << std::endl;
         } else {
-            std::cout << "[MessageHandler] Failed to handle message: " << result.errorMessage << std::endl;
+            std::cout << "[MessageHandler] Failed to handle message: " << result.error_message << std::endl;
         }
     }
 };
