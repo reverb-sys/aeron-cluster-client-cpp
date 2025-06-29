@@ -26,6 +26,8 @@ chmod +x scripts/*.sh
 ./build/examples/basic_client_example
 ```
 
+The basic example can be run in either of publisher / subscriber modes, --help will prove the details on the argument to be used.
+
 ## 📋 Prerequisites
 
 ### System Requirements
