@@ -215,6 +215,61 @@ public:
         });
     }
 
+    std::string send_subscription_request(const std::string& topic) {
+        if (!is_connected()) {
+            throw NotConnectedException();
+        }
+
+        std::string message_id = generate_message_id();
+        std::string message_type = "SUBSCRIBE";
+
+        Json::Value headers;
+        headers["messageId"] = message_id;
+        headers["topic"] = "_subscriptions";
+
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        std::string headers_json = Json::writeString(builder, headers);
+
+         //bool publish_message(const std::string& topic, const std::string& message_type,
+                        //  const std::string& message_id, const std::string& payload,
+                        //  const std::string& headers) {
+
+        /*
+            sample message payload in golang
+
+            Message: map[string]interface{}{
+			"topic":          topic,
+			"action":         "SUBSCRIBE",
+			"resumeStrategy": "FROM_LAST",
+			"lastMessageId":  "1000",
+            }
+
+            Headers: map[string]interface{}{
+			    "clientId": "subscriberClient",
+		    },
+        */
+
+        Json::Value payload;
+        payload["topic"] = topic;
+        payload["action"] = "SUBSCRIBE";
+        payload["resumeStrategy"] = "FROM_LAST";
+        payload["lastMessageId"] = "0"; // Placeholder, can be updated later
+        std::string payload_json = Json::writeString(builder, payload);
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " Sending subscription request for topic: " 
+                      << topic << " (MessageID: " << message_id << ")" << std::endl;
+        }
+
+
+        if (!session_manager_->publish_message("_subscriptions", message_type, message_id, payload_json, headers_json)) {
+            throw ClusterClientException("Failed to send subscription request");
+        }
+
+        stats_.messages_sent++;
+        return message_id;
+    }
+
     bool wait_for_acknowledgment(const std::string& message_id, std::chrono::milliseconds timeout) {
         // This would require tracking pending messages and their acknowledgments
         // For now, return true as a placeholder
@@ -460,6 +515,10 @@ std::string ClusterClient::publish_order(const Order& order) {
 
 std::future<std::string> ClusterClient::publish_order_async(const Order& order) {
     return pImpl_->publish_order_async(order);
+}
+
+std::string ClusterClient::send_subscription_request(const std::string& topic) {
+    return pImpl_->send_subscription_request(topic);
 }
 
 std::string ClusterClient::publish_message(const std::string& message_type,

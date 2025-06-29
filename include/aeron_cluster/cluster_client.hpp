@@ -149,6 +149,16 @@ public:
      */
     std::future<std::string> publish_order_async(const Order& order);
 
+
+    /**
+     * @brief Send a subscription request to a specific topic
+     * @param topic Topic name to subscribe to
+     * @return Message ID for tracking acknowledgments
+     * @throws NotConnectedException if not connected
+     */
+    std::string send_subscription_request(const std::string& topic);
+
+    
     /**
      * @brief Publish a custom message to the cluster
      * @param message_type Type identifier for the message

@@ -73,6 +73,21 @@ class SessionManager::Impl {
                                   << " Successfully connected to member " << member_id
                                   << " with session ID: " << session_id_ << std::endl;
                     }
+
+                    // Start a keepalive thread that sends keepalive messages
+                    std::thread keepalive_thread_ = std::thread([this]() {
+                        while (is_connected()) {
+                            if (!send_keepalive()) {
+                                if (config_.enable_console_errors) {
+                                    std::cerr << config_.logging.log_prefix
+                                              << " Failed to send keepalive message" << std::endl;
+                                }
+                            }
+                            std::this_thread::sleep_for(config_.keepalive_interval);
+                        }
+                    });
+                    keepalive_thread_.detach();  // Detach to run independently
+
                     return result;
                 }
             }
