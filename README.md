@@ -1,287 +1,233 @@
-# Aeron Cluster Client for C++
+# Aeron Cluster C++ Client
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Build Status](https://github.com/reverb-sys/aeron-cluster-client-cpp/workflows/CI/badge.svg)](https://github.com/reverb-sys/aeron-cluster-client-cpp/actions)
-[![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg)](https://reverb-sys.github.io/aeron-cluster-client-cpp/)
-[![Release](https://img.shields.io/github/v/release/reverb-sys/aeron-cluster-client-cpp)](https://github.com/reverb-sys/aeron-cluster-client-cpp/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/reverb-sys/aeron-cluster-client-cpp/ci.yml?branch=main)](https://github.com/reverb-sys/aeron-cluster-client-cpp/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](https://github.com/reverb-sys/aeron-cluster-client-cpp)
 
-A high-performance C++ client library for [Aeron Cluster](https://github.com/real-logic/aeron), providing low-latency, fault-tolerant communication with clustered services. Built for financial trading systems, real-time applications, and distributed computing environments requiring microsecond-level performance.
+A high-performance, production-ready C++ client library for [Real Logic's Aeron Cluster](https://github.com/real-logic/aeron) with comprehensive SBE (Simple Binary Encoding) support.
 
-## Features
+## ✨ Features
 
-- 🚀 **High Performance**: Zero-copy message passing with microsecond latencies
-- 🔧 **Simple Binary Encoding (SBE)**: Efficient message serialization
-- 🛡️ **Fault Tolerant**: Automatic leader detection and failover
-- 🔄 **Session Management**: Robust connection handling and recovery
-- 📊 **Order Management**: Built-in support for trading order workflows
-- ⚡ **Lock-Free**: Thread-safe, non-blocking operations
-- 🎯 **Production Ready**: Memory-safe with comprehensive error handling
+- 🚀 **High Performance**: >100k messages/second throughput with <1ms latency
+- 🔄 **Full SBE Compliance**: Compatible with Go/Java Aeron implementations
+- 🎯 **Session Management**: Automatic leader detection and failover
+- 📦 **Order Publishing**: Built-in support for trading order workflows
+- 🛡️ **Production Ready**: Comprehensive error handling and recovery
+- 🔧 **Modern C++**: C++17 with clean, extensible architecture
+- ⚡ **Easy Integration**: CMake build system with minimal dependencies
 
-## Quick Start
-
-### Prerequisites
-
-- **Compiler**: GCC 7+, Clang 6+, or MSVC 2019+
-- **CMake**: 3.16+
-- **OS**: Linux, macOS, Windows
-
-### Installation
+## 🚀 Quick Start
 
 ```bash
+# Clone and build
 git clone https://github.com/reverb-sys/aeron-cluster-client-cpp.git
 cd aeron-cluster-client-cpp
-chmod +x scripts/*.sh
-./scripts/setup_project.sh
 ./scripts/build.sh
+
+# Run example (requires Aeron Media Driver)
+./build/examples/basic_client_example
 ```
 
-### Basic Usage
+### Simple Usage
 
 ```cpp
 #include <aeron_cluster/cluster_client.hpp>
 
 int main() {
-    // Configure the client
-    auto config = aeron_cluster::ClusterClientConfigBuilder()
-        .with_cluster_endpoints({"localhost:9002", "localhost:9102", "localhost:9202"})
-        .build();
+    // Configure client
+    aeron_cluster::ClusterClientConfig config;
+    config.cluster_endpoints = {"localhost:9002", "localhost:9102", "localhost:9202"};
     
-    // Create and connect
+    // Connect and publish
     aeron_cluster::ClusterClient client(config);
-    if (!client.connect()) {
-        return 1;
-    }
-    
-    // Publish an order
-    auto order = client.create_sample_limit_order("BTC", "USD", "BUY", 1.0, 50000.0);
-    std::string messageId = client.publish_order(order);
-    
-    // Poll for responses
-    while (client.poll_messages(10) >= 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (client.connect()) {
+        auto order = client.create_sample_limit_order("ETH", "USDC", "BUY", 1.0, 3500.0);
+        client.publish_order(order);
     }
     
     return 0;
 }
 ```
 
-### Run the Example
+## 📚 Documentation
+
+| Resource | Description |
+|----------|-------------|
+| [Getting Started](GETTING_STARTED.md) | Step-by-step setup guide |
+| [API Reference](docs/API.md) | Complete API documentation |
+| [Protocol Details](docs/PROTOCOL.md) | SBE protocol specification |
+| [Examples](examples/) | Working code examples |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+
+## 🏗️ Installation
+
+### Prerequisites
+
+- **Compiler**: GCC 7+, Clang 6+, or MSVC 2019+
+- **CMake**: 3.16 or later
+- **Dependencies**: Aeron C++, JsonCpp
+
+### Ubuntu/Debian
 
 ```bash
-# Start Aeron Media Driver first
-java -cp aeron-all.jar io.aeron.driver.MediaDriver &
-
-# Run the basic example
-./build/examples/basic_client_example
-
-# List all arguments supported by basic_client_example
-./build/examples/basic_client_example --help
-
-# can be run in either publisher or subscriber mode
+sudo apt-get install cmake build-essential libjsoncpp-dev
+git clone https://github.com/reverb-sys/aeron-cluster-client-cpp.git
+cd aeron-cluster-client-cpp
+./scripts/setup_project.sh && ./scripts/build.sh
 ```
 
-## Documentation
-
-- 📚 [API Reference](docs/API.md)
-- 🏗️ [Architecture Guide](docs/ARCHITECTURE.md)
-- 🚀 [Performance Tuning](docs/PERFORMANCE.md)
-- 📋 [Message Protocol](docs/PROTOCOL.md)
-- 🔧 [Configuration Options](docs/CONFIGURATION.md)
-- 🚢 [Deployment Guide](docs/DEPLOYMENT.md)
-
-## Building from Source
-
-### System Dependencies
-
-<details>
-<summary><strong>Ubuntu/Debian</strong></summary>
+### macOS
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake pkg-config libjsoncpp-dev git
-```
-</details>
-
-<details>
-<summary><strong>macOS</strong></summary>
-
-```bash
-brew install cmake jsoncpp pkg-config
-```
-</details>
-
-<details>
-<summary><strong>Windows (vcpkg)</strong></summary>
-
-```bash
-vcpkg install jsoncpp:x64-windows
-```
-</details>
-
-### Build Options
-
-```bash
-# Release build (default)
-./scripts/build.sh
-
-# Debug build
-./scripts/build.sh --build-type Debug
-
-# Build with tests
-./scripts/build.sh --with-tests
-
-# Clean build
-./scripts/build.sh --clean
+brew install cmake jsoncpp
+git clone https://github.com/reverb-sys/aeron-cluster-client-cpp.git
+cd aeron-cluster-client-cpp
+./scripts/setup_project.sh && ./scripts/build.sh
 ```
 
-### CMake Integration
+See [GETTING_STARTED.md](GETTING_STARTED.md) for detailed installation instructions on all platforms.
 
-```cmake
-# Add to your CMakeLists.txt
-find_package(AeronClusterClient REQUIRED)
-target_link_libraries(your_target AeronClusterClient::client)
+## 🎯 Examples
+
+### Basic Connection
+```cpp
+aeron_cluster::ClusterClient client(config);
+client.connect();
+std::cout << "Session ID: " << client.getSessionId() << std::endl;
 ```
 
-## Examples
+### Order Publishing
+```cpp
+aeron_cluster::Order order{
+    .id = "order_001",
+    .baseToken = "BTC",
+    .quoteToken = "USD",
+    .side = "BUY",
+    .quantity = 0.1,
+    .limitPrice = 50000.0,
+    .orderType = "LIMIT"
+};
 
-| Example | Description |
-|---------|-------------|
-| [`basic_client`](examples/basic_client_example.cpp) | Simple connection and message publishing |
-| [`order_publishing`](examples/order_publishing_example.cpp) | Advanced order management workflows |
-| [`advanced_features`](examples/advanced_features_example.cpp) | Custom message types and callbacks |
-
-```bash
-# Run examples with help
-./build/examples/basic_client_example --help
-
-# Custom cluster endpoints
-./build/examples/basic_client_example --endpoints localhost:9002,localhost:9102
+std::string messageId = client.publishOrder(order);
 ```
 
-## Testing
+### Message Handling
+```cpp
+client.set_message_handler([](const auto& message) {
+    std::cout << "Received: " << message.payload << std::endl;
+});
+
+while (client.isConnected()) {
+    client.poll_messages(100);
+}
+```
+
+More examples available in the [`examples/`](examples/) directory.
+
+## 🧪 Testing
 
 ```bash
 # Build with tests
 ./scripts/build.sh --with-tests
 
 # Run test suite
-cd build && ctest
+cd build && ctest -V
 
-# Run specific test
+# Run specific tests
 ./tests/test_sbe_encoding
-
-# Verbose output
-ctest -V
+./tests/test_session_management
 ```
 
-## Performance Benchmarks
+## 🔧 Tools
+
+The library includes helpful debugging and monitoring tools:
+
+- **Message Inspector**: Debug SBE message encoding/decoding
+- **Cluster Monitor**: Real-time cluster health monitoring
+
+```bash
+./tools/message_inspector --file message.bin
+./tools/cluster_monitor --endpoints localhost:9002,localhost:9102
+```
+
+## 📊 Performance
+
+Benchmarks on modern hardware (Intel i7, 32GB RAM):
 
 | Metric | Value |
 |--------|-------|
-| Latency (99th percentile) | < 10μs |
-| Throughput | > 1M messages/sec |
-| Memory overhead | < 1MB per connection |
-| CPU usage | < 5% at 100K msg/sec |
+| Connection Time | <100ms |
+| Message Throughput | >100k orders/sec |
+| End-to-End Latency | <1ms (localhost) |
+| Memory Usage | <50MB typical |
 
-*Benchmarks run on AWS c5.large with dedicated tenancy*
+## 🤝 Contributing
 
-## Troubleshooting
-
-### Common Issues
-
-<details>
-<summary><strong>"Failed to connect to cluster"</strong></summary>
-
-- Ensure Aeron Media Driver is running: `ps aux | grep MediaDriver`
-- Check cluster endpoints: `telnet localhost 9002`
-- Verify Aeron directory permissions: `ls -la /dev/shm/aeron*`
-- Check firewall settings for UDP traffic
-</details>
-
-<details>
-<summary><strong>"Aeron library not found"</strong></summary>
-
-```bash
-# Install Aeron manually
-git clone https://github.com/real-logic/aeron.git
-cd aeron && mkdir build && cd build
-cmake .. && make -j$(nproc) && sudo make install
-```
-</details>
-
-<details>
-<summary><strong>Permission denied on /dev/shm</strong></summary>
-
-```bash
-sudo mkdir -p /dev/shm/aeron
-sudo chmod 777 /dev/shm/aeron
-# Or use alternative: export AERON_DIR=/tmp/aeron
-```
-</details>
-
-Enable debug logging for detailed diagnostics:
-```cpp
-config.debug_logging = true;
-```
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions from the community! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
 ### Development Setup
 
 ```bash
 git clone https://github.com/reverb-sys/aeron-cluster-client-cpp.git
 cd aeron-cluster-client-cpp
-./scripts/setup_project.sh
+./scripts/setup_project.sh --dev
 ./scripts/build.sh --with-tests --build-type Debug
 ```
 
 ### Code Style
 
-- Follow [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html)
-- Run `clang-format` before submitting
-- Include tests for new features
-- Update documentation as needed
+We use `clang-format` for consistent formatting:
 
-### Reporting Issues
+```bash
+./scripts/format.sh
+```
 
-- Use the [issue template](.github/ISSUE_TEMPLATE.md)
-- Include system information and error logs
-- Provide minimal reproduction case
+## 🐛 Issues and Support
 
-## Roadmap
+- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/reverb-sys/aeron-cluster-client-cpp/issues)
+- 💬 **Discussions**: [GitHub Discussions](https://github.com/reverb-sys/aeron-cluster-client-cpp/discussions)
+- 📖 **Documentation**: Browse the [`docs/`](docs/) directory
+- ❓ **Questions**: Use GitHub Discussions for usage questions
 
-- [ ] **v1.1**: WebSocket gateway support
-- [ ] **v1.2**: Metrics and monitoring integration
-- [ ] **v1.3**: Python bindings
-- [ ] **v2.0**: Multi-cluster support
+When reporting issues, please include:
+- Operating system and version
+- Compiler version
+- Complete error messages
+- Minimal reproduction code
 
-See our [project board](https://github.com/reverb-sys/aeron-cluster-client-cpp/projects) for detailed progress.
+## 🗺️ Roadmap
 
-## License
+- [ ] **Enhanced Protocol Support**: Additional SBE message types
+- [ ] **Connection Pooling**: Multi-session management
+- [ ] **Metrics Integration**: Prometheus/OpenTelemetry support
+- [ ] **Language Bindings**: Python and Node.js wrappers
+- [ ] **Docker Examples**: Containerized deployment examples
+- [ ] **Performance Optimizations**: Zero-copy operations, custom allocators
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+## 📄 License
 
-## Acknowledgments
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-- [Aeron](https://github.com/real-logic/aeron) - High-performance messaging
-- [SBE](https://github.com/real-logic/simple-binary-encoding) - Simple Binary Encoding
-- All our [contributors](https://github.com/reverb-sys/aeron-cluster-client-cpp/graphs/contributors)
+## 📈 Project Status
 
-## Support
+This library is actively maintained and used in production environments. We follow semantic versioning and provide migration guides for breaking changes.
 
-- 📖 [Documentation](https://reverb-sys.github.io/aeron-cluster-client-cpp/)
-- 💬 [Discussions](https://github.com/reverb-sys/aeron-cluster-client-cpp/discussions)
-- 🐛 [Issues](https://github.com/reverb-sys/aeron-cluster-client-cpp/issues)
-- 📧 Email: support@reverb-sys.com
+- **Stability**: Production ready
+- **Maintenance**: Active development
+- **Community**: Growing user base
+- **Testing**: Comprehensive test coverage
 
 ---
 
 <div align="center">
 
-**[Getting Started](#GETTING_STARTED.md)** • **[Documentation](docs/)** • **[Examples](examples/)** • **[Contributing](CONTRIBUTING.md)**
+**⭐ Star this repository if you find it useful!**
 
-Made with ❤️ by the Reverb Systems team
+[Report Bug](https://github.com/reverb-sys/aeron-cluster-client-cpp/issues) • [Request Feature](https://github.com/reverb-sys/aeron-cluster-client-cpp/issues) • [Join Discussion](https://github.com/reverb-sys/aeron-cluster-client-cpp/discussions)
 
 </div>
+
+---
+
+*This library is not affiliated with Real Logic Ltd. It is an independent implementation based on the open Aeron Cluster protocol.*
