@@ -313,8 +313,23 @@ struct ParseResult {
      * @brief Check if this is a topic message
      */
     bool is_topic_message() const {
-        return template_id == SBEConstants::TOPIC_MESSAGE_TEMPLATE_ID && 
-               schema_id == SBEConstants::TOPIC_SCHEMA_ID;
+        if (template_id == SBEConstants::TOPIC_MESSAGE_TEMPLATE_ID &&  schema_id == SBEConstants::TOPIC_SCHEMA_ID) {
+            return true;
+        }
+
+        if (schema_id == SBEConstants::TOPIC_SCHEMA_ID && 
+            template_id == SBEConstants::SESSION_EVENT_TEMPLATE_ID) {
+            // Check if embedded message is a topic message
+            return true; // This would require further parsing of the embedded message
+        }
+
+        if (schema_id == SBEConstants::CLUSTER_SCHEMA_ID &&
+            template_id == SBEConstants::TOPIC_MESSAGE_TEMPLATE_ID) {
+            // Check if embedded message is a topic message
+            return true; // This would require further parsing of the embedded message
+        }
+
+        return false;
     }
 
     /**
@@ -340,6 +355,8 @@ public:
      * @brief Parse any SBE message and return detailed result
      */
     static ParseResult parse_message(const std::uint8_t* data, std::size_t length);
+    static ParseResult decode_topic_message_with_sbe(const uint8_t* data, size_t length);
+    static ParseResult decode_acknowledgment_with_sbe(const uint8_t* data, size_t length);
 
     /**
      * @brief Parse message with detailed debugging output

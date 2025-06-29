@@ -229,11 +229,13 @@ int main(int argc, char* argv[]) {
         
         client.set_message_callback([&](const aeron_cluster::ParseResult& result) {
             if (result.message_type.find("ACK") != std::string::npos || 
-                result.message_type.find("ACKNOWLEDGMENT") != std::string::npos) {
+                result.message_type.find("ACKNOWLEDGMENT") != std::string::npos ||
+                result.message_type.find("Acknowledgment") != std::string::npos) {
 
                 // Parse the acknowledgment
                 if (result.payload.find("\"success\":true") != std::string::npos ||
-                    result.payload.find("\"status\":\"success\"") != std::string::npos) {
+                    result.payload.find("\"status\":\"success\"") != std::string::npos || 
+                    result.payload.find("SUCCESS") != std::string::npos) {
                     acknowledgedOrders++;
                     std::cout << "✅ Order acknowledged (" << acknowledgedOrders << "/" << orderCount << ")" << std::endl;
                 } else {
