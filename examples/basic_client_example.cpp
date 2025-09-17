@@ -311,7 +311,7 @@ int main(int argc, char* argv[]) {
         if (clientType == "subscriber") {
             std::cout << "📡 Subscribing to order acknowledgments..." << std::endl;
             // Subscribe to orders topic: Send subscription request to _subscriptions topic
-            client.send_subscription_request("order_request_topic");
+            client.send_subscription_request("order_request_topic", "sender_comp_id", "LATEST");
 
             std::cout << "   Waiting for acknowledgments (no orders sent)" << std::endl;
             while (running) {

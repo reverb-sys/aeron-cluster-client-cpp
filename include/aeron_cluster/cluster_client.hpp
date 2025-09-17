@@ -159,7 +159,7 @@ public:
      * @return Message ID for tracking acknowledgments
      * @throws NotConnectedException if not connected
      */
-    std::string send_subscription_request(const std::string& topic);
+    std::string send_subscription_request(const std::string& topic, const std::string& messageIdentifier, const std::string& resumeStrategy);
 
     
     /**
