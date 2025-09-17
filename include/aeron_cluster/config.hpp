@@ -31,6 +31,7 @@ struct ClusterClientConfig {
     std::vector<std::string> cluster_endpoints = {
         "localhost:9002", "localhost:9102", "localhost:9202"
     };
+    std::string client_id = "cpp_client";
     std::string response_channel = "aeron:udp?endpoint=localhost:0";
     std::string aeron_dir = "/dev/shm/aeron";
     
