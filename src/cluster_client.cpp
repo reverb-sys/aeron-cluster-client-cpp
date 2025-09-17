@@ -276,7 +276,7 @@ class ClusterClient::Impl {
         });
     }
 
-    std::string send_subscription_request(const std::string& topic) {
+    std::string send_subscription_request(const std::string& topic, const std::string& messageIdentifier, const std::string& resumeStrategy) {
         if (!is_connected()) {
             throw NotConnectedException();
         }
@@ -292,30 +292,11 @@ class ClusterClient::Impl {
         builder["indentation"] = "";
         std::string headers_json = Json::writeString(builder, headers);
 
-        // bool publish_message(const std::string& topic, const std::string& message_type,
-        //   const std::string& message_id, const std::string& payload,
-        //   const std::string& headers) {
-
-        /*
-            sample message payload in golang
-
-            Message: map[string]interface{}{
-            "topic":          topic,
-            "action":         "SUBSCRIBE",
-            "resumeStrategy": "FROM_LAST",
-            "lastMessageId":  "1000",
-            }
-
-            Headers: map[string]interface{}{
-                "clientId": "subscriberClient",
-            },
-        */
-
         Json::Value payload;
         payload["topic"] = topic;
         payload["action"] = "SUBSCRIBE";
-        payload["resumeStrategy"] = "FROM_LAST";
-        payload["lastMessageId"] = "0";  // Placeholder, can be updated later
+        payload["messageIdentifier"] = messageIdentifier;
+        payload["resumeStrategy"] = resumeStrategy;
         std::string payload_json = Json::writeString(builder, payload);
         if (config_.debug_logging) {
             std::cout << config_.logging.log_prefix
@@ -627,8 +608,8 @@ std::future<std::string> ClusterClient::publish_order_async(const Order& order) 
     return pImpl_->publish_order_async(order);
 }
 
-std::string ClusterClient::send_subscription_request(const std::string& topic) {
-    return pImpl_->send_subscription_request(topic);
+std::string ClusterClient::send_subscription_request(const std::string& topic, const std::string& messageIdentifier, const std::string& resumeStrategy) {
+    return pImpl_->send_subscription_request(topic, messageIdentifier, resumeStrategy);
 }
 
 std::string ClusterClient::publish_message(const std::string& message_type,
