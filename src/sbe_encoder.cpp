@@ -977,10 +977,9 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
     std::cout << "[DEBUG] decode_topic_message_with_sbe: starting SBE decoding" << std::endl;
 
     try {
-        // Cast to char* for SBE compatibility
         char* bufferPtr = const_cast<char*>(reinterpret_cast<const char*>(data));
 
-        // First decode the header to get acting parameters
+        // Decode SBE message header first
         sbe::MessageHeader messageHeader;
         messageHeader.wrap(bufferPtr, 0, 0, length);
 
@@ -989,49 +988,52 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         uint16_t template_id = messageHeader.templateId();
         uint16_t schema_id = messageHeader.schemaId();
 
-        std::cout << "[DEBUG] SBE TopicMessage Header decoded:" << std::endl;
-        std::cout << "[DEBUG]   acting_block_length=" << acting_block_length << std::endl;
-        std::cout << "[DEBUG]   acting_version=" << acting_version << std::endl;
-        std::cout << "[DEBUG]   template_id=" << template_id << std::endl;
-        std::cout << "[DEBUG]   schema_id=" << schema_id << std::endl;
+        std::cout << "[DEBUG] SBE TopicMessage Header decoded: \nblock_length=" << acting_block_length << "\nversion=" << acting_version << "\ntemplate_id=" << template_id << "\nschema_id=" << schema_id << std::endl;
 
-        // Verify this is a TopicMessage
         if (template_id != sbe::TopicMessage::sbeTemplateId() ||
             schema_id != sbe::TopicMessage::sbeSchemaId()) {
             result.error_message =
-                "Message is not a TopicMessage. Expected: template_id=" +
-                std::to_string(sbe::TopicMessage::sbeTemplateId()) +
-                ", schema_id=" + std::to_string(sbe::TopicMessage::sbeSchemaId()) +
-                ". Got: template_id=" + std::to_string(template_id) +
-                ", schema_id=" + std::to_string(schema_id);
+                "Not a TopicMessage (got template_id=" + std::to_string(template_id) +
+                ", schema_id=" + std::to_string(schema_id) + ")";
+            std::cout << "[ERROR] 12121212 " << result.error_message << std::endl;
             return result;
         }
 
-        // Create TopicMessage and wrap for decoding
+        // ✅ Only skip the SBE header (8 bytes), not block_length
+        std::size_t messageBodyLength = length - sbe::MessageHeader::encodedLength();
+
         sbe::TopicMessage topicMessage;
+
+        std::cout << "[DEBUG] before wrapForDecode" << std::endl;
         topicMessage.wrapForDecode(bufferPtr,
-                                   sbe::MessageHeader::encodedLength(),  // Start after the header
-                                   acting_block_length, acting_version, length);
+                                   sbe::MessageHeader::encodedLength(),  // start right after header
+                                   sbe::TopicMessage::sbeBlockLength(), 
+                                   acting_version,
+                                   static_cast<int>(messageBodyLength));
+        std::cout << "[DEBUG] after wrapForDecode" << std::endl;
+        // print the topic message
+        std::cout << "[DEBUG] topicMessage:" << std::endl;
+        std::cout << "  timestamp=" << topicMessage.timestamp() << std::endl;
+        std::cout << "  topic=" << topicMessage.getTopicAsString() << std::endl;
+        std::cout << "  messageType=" << topicMessage.getMessageTypeAsString() << std::endl;
+        std::cout << "  uuid=" << topicMessage.getUuidAsString() << std::endl;
+        std::cout << "  payload=" << topicMessage.getPayloadAsString() << std::endl;
 
-        // Extract timestamp
+
+        try {
+            std::cout << "  headers=" << topicMessage.getHeadersAsString() << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "[ERROR] Exception while decoding headers: " << e.what() << std::endl;
+        }
+
+        // Decode fields
         uint64_t timestamp = topicMessage.timestamp();
-        std::cout << "[DEBUG] Extracted timestamp: " << timestamp << std::endl;
-
-        // Extract variable length fields using SBE methods
         std::string topic = topicMessage.getTopicAsString();
         std::string messageType = topicMessage.getMessageTypeAsString();
         std::string uuid = topicMessage.getUuidAsString();
         std::string payload = topicMessage.getPayloadAsString();
-        std::string headers = topicMessage.getHeadersAsString();
 
-        std::cout << "[DEBUG] SBE TopicMessage extraction successful:" << std::endl;
-        std::cout << "[DEBUG]   topic: \"" << topic << "\"" << std::endl;
-        std::cout << "[DEBUG]   messageType: \"" << messageType << "\"" << std::endl;
-        std::cout << "[DEBUG]   uuid: \"" << uuid << "\"" << std::endl;
-        std::cout << "[DEBUG]   payload length: " << payload.length() << std::endl;
-        std::cout << "[DEBUG]   headers length: " << headers.length() << std::endl;
-
-        // Fill the result
+        // Fill result
         result.success = true;
         result.template_id = template_id;
         result.schema_id = schema_id;
@@ -1040,14 +1042,18 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         result.message_type = messageType;
         result.message_id = uuid;
         result.payload = payload;
-        result.headers = headers;
+        try {
+            std::string headers = topicMessage.getHeadersAsString();
+            std::cout << "[DEBUG] headers=" << headers << std::endl;
+            result.headers = headers;
+        } catch (const std::exception& e) {
+            std::cout << "[ERROR] Exception while decoding headers: " << e.what() << std::endl;
+        }
         result.timestamp = static_cast<int64_t>(timestamp);
 
-        std::cout << "[DEBUG] decode_topic_message_with_sbe: SUCCESS" << std::endl;
         return result;
 
     } catch (const std::exception& e) {
-        std::cout << "[ERROR] SBE TopicMessage decoding exception: " << e.what() << std::endl;
         result.error_message = "SBE TopicMessage decoding failed: " + std::string(e.what());
         return result;
     }

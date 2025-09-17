@@ -244,6 +244,7 @@ int main(int argc, char* argv[]) {
                           .with_aeron_dir(aeronDir)
                           .with_response_timeout(std::chrono::milliseconds(connectionTimeout))
                           .with_max_retries(3)
+                          .with_default_topic("order_request_topic")
                           .build();
 
         // Enable debug mode if requested
@@ -310,7 +311,7 @@ int main(int argc, char* argv[]) {
         if (clientType == "subscriber") {
             std::cout << "📡 Subscribing to order acknowledgments..." << std::endl;
             // Subscribe to orders topic: Send subscription request to _subscriptions topic
-            client.send_subscription_request("orders");
+            client.send_subscription_request("order_request_topic");
 
             std::cout << "   Waiting for acknowledgments (no orders sent)" << std::endl;
             while (running) {

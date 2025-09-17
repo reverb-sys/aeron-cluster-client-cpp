@@ -11,6 +11,9 @@
 #include <future>
 #include <chrono>
 #include <exception>
+#include "aeron_cluster/message_handler.hpp"
+#include "aeron_cluster/subscription.hpp"
+#include "aeron_cluster/protocol.hpp"
 
 namespace aeron_cluster {
 
@@ -274,6 +277,51 @@ public:
         const std::string& side = "BUY",
         double quantity = 1.0);
 
+    /**
+     * @brief Create a complete message structure for order creation
+     * @param base_token Base token symbol (e.g., "BTC")
+     * @param quote_token Quote token symbol (e.g., "USD")
+     * @param side Order side ("buy" or "sell")
+     * @param quantity Order quantity
+     * @param limit_price Limit price for the order
+     * @return JSON string representing the complete message structure
+     */
+    static std::string create_order_message(
+        const std::string& base_token = "BTC",
+        const std::string& quote_token = "USD",
+        const std::string& side = "sell",
+        double quantity = 0.0001,
+        double limit_price = 300000.0);
+
+    // Publish to a topic with type and JSON payload
+    // Returns message UUID for correlation
+    std::string publish_topic(std::string_view topic,
+        std::string_view message_type,
+        std::string_view json_payload,
+        std::string_view headers_json = "{}");
+
+    // Send subscription (_subscriptions) for a topic
+    bool subscribe_topic(std::string_view topic, std::string_view resume_strategy = "LATEST");
+
+    // Callbacks
+    void on_topic_message(TopicMessageCallback cb) { handler_.set_topic_message_callback(std::move(cb)); }
+    void on_ack(AckCallback cb) { handler_.set_ack_callback(std::move(cb)); }
+
+private:
+    // ingress/egress plumbing
+    bool offer_ingress(const std::uint8_t* data, std::size_t len); // wraps your underlying Aeron offer
+
+    // correlation for RTT
+    void remember_outgoing(const std::string& uuid, std::uint64_t ts_nanos);
+    void on_ack_default(const AckInfo& ack);
+
+private:
+    ClusterClientConfig cfg_;
+    MessageHandler handler_;
+
+    // map: uuid -> send_timestamp_nanos
+    std::unordered_map<std::string, std::uint64_t> inflight_;
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;
@@ -348,5 +396,13 @@ private:
     ClusterClient& client_;
     bool connected_;
 };
+
+struct SubscriptionOptions {
+    std::string resumeStrategy = "LATEST"; // or "FROM_LAST" etc.
+    std::string lastMessageId;             // optional
+    std::string clientId = "cpp_client";
+};
+
+bool subscribeToTopic(const std::string& topic, const SubscriptionOptions& opt = {});
 
 } // namespace aeron_cluster

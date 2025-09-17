@@ -57,6 +57,7 @@ endif()
 
 # Find Aeron C++ include directories - check multiple possible locations
 set(AERON_CLUSTER_INCLUDE_DIR
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${AERON_ROOT}/aeron-client/src/main/cpp
     ${AERON_ROOT}/aeron-client/src/main/c
     ${AERON_ROOT}/aeron-driver/src/main/c
@@ -129,6 +130,7 @@ set_target_properties(aeron PROPERTIES
 # Create main library
 add_library(aeron-cluster-cpp STATIC
     src/cluster_client.cpp
+    src/cluster_client_offer.cpp
     src/sbe_encoder.cpp
     src/session_manager.cpp
     src/message_handlers.cpp
