@@ -1,4 +1,4 @@
-#include "aeron_cluster/message_handlers.hpp"
+#include "aeron_cluster/message_handler.hpp"
 #include <iostream>
 
 namespace aeron_cluster {

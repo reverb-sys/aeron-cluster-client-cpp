@@ -502,7 +502,7 @@ private:
 EOF
 
     # Message handlers header stub
-    cat > "$PROJECT_DIR/src/message_handlers.hpp" << 'EOF'
+    cat > "$PROJECT_DIR/src/message_handler.hpp" << 'EOF'
 #pragma once
 
 #include "aeron_cluster/sbe_messages.hpp"
