@@ -7,6 +7,7 @@
 #include "aeron_cluster/protocol.hpp"
 #include "aeron_cluster/topic_router.hpp"
 #include "aeron_cluster/ack_decoder.hpp"
+#include "aeron_cluster/sbe_messages.hpp"
 
 // SBE generated
 #include "model/MessageHeader.h"
@@ -24,6 +25,12 @@ using TopicMessageCallback = std::function<void(std::string_view topic,
 using AckCallback = std::function<void(const AckInfo&)>;
 
 class MessageHandler {
+public:
+    explicit MessageHandler();
+    ~MessageHandler();
+    
+    void handleMessage(const ParseResult& result);
+
 public:
     void on_egress(const std::uint8_t* data, std::size_t len) {
         if (len < 8) return;
@@ -84,6 +91,10 @@ private:
 private:
     TopicMessageCallback tm_cb_;
     AckCallback          ack_cb_;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> pImpl;
 };
 
 } // namespace aeron_cluster

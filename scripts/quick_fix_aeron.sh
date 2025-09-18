@@ -165,7 +165,7 @@ add_library(aeron-cluster-cpp STATIC
     src/cluster_client.cpp
     src/sbe_encoder.cpp
     src/session_manager.cpp
-    src/message_handlers.cpp
+    src/message_handler.cpp
 )
 
 target_include_directories(aeron-cluster-cpp
