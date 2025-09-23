@@ -1,19 +1,20 @@
 #include "aeron_cluster/cluster_client.hpp"
-
+#include "aeron_cluster/performance_config.hpp"
 #include <Aeron.h>
 #include <json/json.h>
 
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <iostream>
 #include <sstream>
 #include <thread>
-#include <vector>
 #include <unordered_map>
-#include <cstdio>
+#include <vector>
 
 #include "aeron_cluster/ack_decoder.hpp"  // dual-path ACK decoding (simple + full SBE)
-#include "aeron_cluster/protocol.hpp"     // constants: template ids, schema id, etc.
+#include "aeron_cluster/debug_utils.hpp"
+#include "aeron_cluster/protocol.hpp"  // constants: template ids, schema id, etc.
 
 // Removed conflicting declaration header
 #include "aeron_cluster/protocol.hpp"
@@ -31,7 +32,6 @@ class LocalFragmentReassembler {
 
     void onFragment(aeron::AtomicBuffer& buffer, aeron::util::index_t offset,
                     aeron::util::index_t length, aeron::logbuffer::Header& header) {
-        // Aeron flags: BEGIN=0x80, END=0x40 (BEGIN|END == single-fragment message)
         static constexpr std::uint8_t BEGIN_FLAG = 0x80;
         static constexpr std::uint8_t END_FLAG = 0x40;
 
@@ -53,9 +53,11 @@ class LocalFragmentReassembler {
 
         // End fragment: deliver assembled
         if (flags & END_FLAG) {
-            aeron::AtomicBuffer assembled(const_cast<std::uint8_t*>(acc_.data()),
-                                          static_cast<std::int32_t>(acc_.size()));
-            sink_(assembled, 0, static_cast<aeron::util::index_t>(acc_.size()), header);
+            // Create a copy to avoid dangling pointer issues
+            std::vector<std::uint8_t> assembled_data(acc_.begin(), acc_.end());
+            aeron::AtomicBuffer assembled(const_cast<std::uint8_t*>(assembled_data.data()),
+                                          static_cast<std::int32_t>(assembled_data.size()));
+            sink_(assembled, 0, static_cast<aeron::util::index_t>(assembled_data.size()), header);
             acc_.clear();
         }
     }
@@ -74,15 +76,15 @@ class ClusterClient::Impl {
         : config_(config),
           session_manager_(std::make_unique<SessionManager>(config)),
           connection_state_(ConnectionState::DISCONNECTED),
-          auto_reconnect_enabled_(false) {
-        if (config_.debug_logging) {
-            std::cout << config_.logging.log_prefix << " Creating ClusterClient" << std::endl;
-        }
-    }
+          auto_reconnect_enabled_(false) {}
 
     ~Impl() {
-        stop_polling();
-        disconnect();
+        try {
+            stop_polling();
+            disconnect();
+        } catch (const std::exception& e) {
+            DEBUG_LOG("Error in destructor: ", e.what());
+        }
     }
 
     std::future<bool> connect_async() {
@@ -99,9 +101,6 @@ class ClusterClient::Impl {
         try {
             stats_.connection_attempts++;
 
-            std::cout << config_.logging.log_prefix << " Connecting to Aeron Cluster..."
-                      << std::endl;
-            // Initialize Aeron
             if (!initialize_aeron()) {
                 set_connection_state(ConnectionState::FAILED);
                 return false;
@@ -109,29 +108,17 @@ class ClusterClient::Impl {
 
             start_polling();
 
-            std::cout << config_.logging.log_prefix << " Aeron initialized successfully"
-                      << std::endl;
-
-            // Create egress subscription
             if (!create_egress_subscription()) {
                 set_connection_state(ConnectionState::FAILED);
                 return false;
             }
 
-            std::cout << config_.logging.log_prefix << " Egress subscription created successfully"
-                      << std::endl;
-
-            // Connect session manager
             SessionConnectionResult result = session_manager_->connect(aeron_);
             if (!result.success) {
                 set_connection_state(ConnectionState::FAILED);
                 return false;
             }
 
-            std::cout << config_.logging.log_prefix << " Session manager connected successfully"
-                      << std::endl;
-
-            // Update statistics
             stats_.successful_connections++;
             stats_.current_session_id = result.session_id;
             stats_.current_leader_id = result.leader_member_id;
@@ -139,23 +126,10 @@ class ClusterClient::Impl {
             stats_.is_connected = true;
 
             set_connection_state(ConnectionState::CONNECTED);
-
-            if (config_.enable_console_info) {
-                std::cout << config_.logging.log_prefix << " Connected to Aeron Cluster!"
-                          << std::endl;
-                std::cout << config_.logging.log_prefix
-                          << "    Session ID: " << stats_.current_session_id << std::endl;
-                std::cout << config_.logging.log_prefix
-                          << "    Leader Member: " << stats_.current_leader_id << std::endl;
-            }
-
             return true;
 
         } catch (const std::exception& e) {
-            if (config_.enable_console_errors) {
-                std::cerr << config_.logging.log_prefix << " Connection failed: " << e.what()
-                          << std::endl;
-            }
+            DEBUG_LOG("Connection failed: ", e.what());
             set_connection_state(ConnectionState::FAILED);
             return false;
         }
@@ -183,10 +157,6 @@ class ClusterClient::Impl {
         stats_.current_session_id = -1;
         stats_.current_leader_id = -1;
         stats_.is_connected = false;
-
-        if (config_.enable_console_info) {
-            std::cout << config_.logging.log_prefix << " Disconnected from cluster" << std::endl;
-        }
     }
 
     bool is_connected() const {
@@ -220,11 +190,6 @@ class ClusterClient::Impl {
         std::string message_type = "CREATE_ORDER";
         if (order.status == "UPDATED" || order.status == "CANCELLED") {
             message_type = "UPDATE_ORDER";
-        }
-
-        if (config_.debug_logging) {
-            std::cout << config_.logging.log_prefix << " Publishing order: " << order.id
-                      << " (MessageID: " << message_id << ")" << std::endl;
         }
 
         std::string order_json = order.to_json();
@@ -276,7 +241,9 @@ class ClusterClient::Impl {
         });
     }
 
-    std::string send_subscription_request(const std::string& topic, const std::string& messageIdentifier, const std::string& resumeStrategy) {
+    std::string send_subscription_request(const std::string& topic,
+                                          const std::string& messageIdentifier,
+                                          const std::string& resumeStrategy) {
         if (!is_connected()) {
             throw NotConnectedException();
         }
@@ -361,20 +328,17 @@ class ClusterClient::Impl {
         int messages_processed = 0;
 
         try {
-            const int fragments = egress_subscription_->poll(
+            // Use optimized batch processing
+            const int fragments = MessageBatchProcessor::process_batch(
+                *egress_subscription_,
                 [this](aeron::AtomicBuffer& buffer, aeron::util::index_t offset,
                        aeron::util::index_t length, aeron::logbuffer::Header& header) {
-                    // Reassemble (BEGIN/MIDDLE/END) and invoke handle_incoming_message
                     egress_reassembler_->onFragment(buffer, offset, length, header);
-                },
-                max_messages);
+                });
             messages_processed += fragments;
             stats_.messages_received += fragments;
         } catch (const std::exception& e) {
-            if (config_.debug_logging) {
-                std::cerr << config_.logging.log_prefix << " Error polling messages: " << e.what()
-                          << std::endl;
-            }
+            DEBUG_LOG("Error polling messages: ", e.what());
         }
         return messages_processed;
     }
@@ -398,7 +362,7 @@ class ClusterClient::Impl {
     std::future<bool> reconnect_async() {
         return std::async(std::launch::async, [this]() {
             disconnect();
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(PerformanceConfig::RECONNECT_DELAY);
             return connect();
         });
     }
@@ -431,10 +395,7 @@ class ClusterClient::Impl {
             aeron_ = aeron::Aeron::connect(context);
             return true;
         } catch (const std::exception& e) {
-            if (config_.enable_console_errors) {
-                std::cerr << config_.logging.log_prefix
-                          << " Aeron initialization error: " << e.what() << std::endl;
-            }
+            DEBUG_LOG("Aeron initialization error: ", e.what());
             return false;
         }
     }
@@ -444,7 +405,7 @@ class ClusterClient::Impl {
             std::int64_t sub_id =
                 aeron_->addSubscription(config_.response_channel, config_.egress_stream_id);
 
-            auto timeout = std::chrono::seconds(10);
+            auto timeout = PerformanceConfig::CONNECTION_TIMEOUT;
             auto start_time = std::chrono::steady_clock::now();
 
             while ((std::chrono::steady_clock::now() - start_time) < timeout) {
@@ -462,10 +423,7 @@ class ClusterClient::Impl {
 
             return false;
         } catch (const std::exception& e) {
-            if (config_.enable_console_errors) {
-                std::cerr << config_.logging.log_prefix
-                          << " Egress subscription error: " << e.what() << std::endl;
-            }
+            DEBUG_LOG("Egress subscription error: ", e.what());
             return false;
         }
     }
@@ -473,24 +431,29 @@ class ClusterClient::Impl {
     void handle_incoming_message(const aeron::AtomicBuffer& buffer, aeron::util::index_t offset,
                                  aeron::util::index_t length) {
         try {
-            // const std::uint8_t* data = buffer.buffer() + offset;
             const std::uint8_t* data =
                 reinterpret_cast<const std::uint8_t*>(buffer.buffer()) + offset;
             ParseResult result = MessageParser::parse_message(data, length);
-
+            std::cout << "Received message: " << result.message_type << " " << result.message_id << " " << result.error_message
+                      << " - " << result.headers << " - " << result.payload
+                      << std::endl;
             if (result.success) {
+                // Handle session events first
                 if (result.is_session_event()) {
                     session_manager_->handle_session_event(result);
                 }
 
+                // Call the message callback for all successful messages
                 if (message_callback_) {
                     message_callback_(result);
                 }
+            } else {
+                DEBUG_LOG("Failed to parse message: ", result.error_message);
             }
         } catch (const std::exception& e) {
-            if (config_.debug_logging) {
-                std::cerr << config_.logging.log_prefix
-                          << " Error handling incoming message: " << e.what() << std::endl;
+            DEBUG_LOG("Error handling incoming message: ", e.what());
+            if (error_callback_) {
+                error_callback_("Message handling error: " + std::string(e.what()));
             }
         }
     }
@@ -503,11 +466,11 @@ class ClusterClient::Impl {
     }
 
     void polling_worker() {
-        while (polling_active_) {
+        while (polling_active_.load()) {
             try {
-                int processed = poll_messages(10);
+                int processed = poll_messages(PerformanceConfig::DEFAULT_POLL_BATCH_SIZE);
                 if (processed == 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::sleep_for(PerformanceConfig::POLL_INTERVAL);
                 }
             } catch (const std::exception& e) {
                 if (error_callback_) {
@@ -529,36 +492,7 @@ static inline std::uint64_t le64(const std::uint8_t* p) {
         v |= (std::uint64_t)p[i] << (8 * i);
     return v;
 }
-struct TMDecoded {
-    std::uint64_t ts{};
-    std::string topic, mtype, uuid, payload, headers;
-};
-static bool manual_decode_topic_message(const std::uint8_t* data, std::size_t len,
-                                        TMDecoded& out) {
-    if (len < 16)
-        return false;  // header(8) + ts(8)
-    // header sanity: 8/1/1/1
-    if (le16(data + 0) != 8 || le16(data + 2) != 1 || le16(data + 4) != 1 ||
-        le16(data + 6) != 1)
-        return false;
-    std::size_t pos = 8;
-    out.ts = le64(data + pos);
-    pos += 8;
-
-    auto readVar = [&](std::string& s) -> bool {
-        if (pos + 2 > len)
-            return false;
-        const std::uint16_t L = le16(data + pos);
-        pos += 2;
-        if (pos + L > len)
-            return false;
-        s.assign(reinterpret_cast<const char*>(data + pos), L);
-        pos += L;
-        return true;
-    };
-    return readVar(out.topic) && readVar(out.mtype) && readVar(out.uuid) &&
-           readVar(out.payload) && readVar(out.headers);
-}
+// Removed unused manual_decode_topic_message function
 
 // ClusterClient public interface implementation
 ClusterClient::ClusterClient(const ClusterClientConfig& config)
@@ -608,13 +542,14 @@ std::future<std::string> ClusterClient::publish_order_async(const Order& order) 
     return pImpl_->publish_order_async(order);
 }
 
-std::string ClusterClient::send_subscription_request(const std::string& topic, const std::string& messageIdentifier, const std::string& resumeStrategy) {
+std::string ClusterClient::send_subscription_request(const std::string& topic,
+                                                     const std::string& messageIdentifier,
+                                                     const std::string& resumeStrategy) {
     return pImpl_->send_subscription_request(topic, messageIdentifier, resumeStrategy);
 }
 
 std::string ClusterClient::publish_message(const std::string& message_type,
-                                           const std::string& payload,
-                                           const std::string& headers) {
+                                           const std::string& payload, const std::string& headers) {
     return pImpl_->publish_message(message_type, payload, headers);
 }
 
@@ -773,12 +708,13 @@ Order ClusterClient::create_sample_limit_order(const std::string& base_token,
     // Generate unique identifiers
     std::string uuid = OrderUtils::generate_uuid();
     std::string client_order_id = uuid;
-    
+
     // Get current timestamp
     auto now = std::chrono::system_clock::now();
-    auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    auto timestamp_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     std::string create_ts = std::to_string(timestamp_ms);
-    
+
     // Create order with new structure
     Order order(base_token, quote_token, side, quantity, "LIMIT");
     order.id = OrderUtils::generate_order_id();
@@ -795,27 +731,12 @@ Order ClusterClient::create_sample_limit_order(const std::string& base_token,
     order.account_id = 11111;
     order.base_token_usd_rate = limit_price;
     order.quote_token_usd_rate = 1.0;
-    
+
     // Set quantity token to match the base token
     order.quantity_token = base_token;
-    
+
     // Initialize timestamps
     order.initialize_timestamps();
-    
-    // Store the message structure in metadata for serialization
-    order.metadata["uuid"] = uuid;
-    order.metadata["msg_type"] = "D";
-    order.metadata["origin"] = "fix";
-    order.metadata["origin_name"] = "FIX_GATEWAY";
-    order.metadata["origin_id"] = "DEV_FIX01_TX";
-    order.metadata["connection_uuid"] = "129725";
-    order.metadata["customer_id"] = "75";
-    order.metadata["ip_address"] = "13.127.186.179";
-    order.metadata["create_ts"] = create_ts;
-    order.metadata["auth_token"] = "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhayI6IjZTYXZHSFJkMzJCVWdXZ05NdEdBQnBZV05aaFFkMUxQZ1dsbE1oOHh4RXdqUjNOMTFvaWNMcXY2STltVkZvcUYiLCJhdWQiOiJERVZfRklYMDFfVFgiLCJleHAiOjE3NTgxMDE1NzEsImlhdCI6MTc1NzkyODc3MSwic2NvcGUiOiJ3cml0ZTp0cmFkZSBjcnVkOnNlc3Npb24ifQ.UPrSbS80TZDf_0ATdMCwPHf3DUhDDqqIiszBKjTL0emMSFtP4Qq9Bl1OxjXYrFI9kUpqtwBI3qyd1SwR3n2qgqh94Wi42E4OW8QeJD-R_KTgL5rAH0Fmo0IhG4EEwtYVpISYAXkuEbIV74mjBC1uzfNaaB7SXbMUuejovZpLpWkeMFDXhbjovQjWbzde0NIjtJ5LBXSRkqe39IjFEdWpheYEUZp7gV9HcuGklkwqBA3VFVUW_OgFKxtP7BXbgmijYwb1ojxvOB_rLSewk6mCABAUZaosbi5fgZGtv6R35p0VpBPUZ3-9hRcpaPveq9XROzeTx4J-9Bgz3GseGPXcfvkUhA2qqPihh8-W79ztXLwsx3bupnizaMHFdq7b07Ta8ILrVwH8son5AX1s0aOmuHp0fykGyjVM07QGyYYia33FIE1HOnJzzK1GqEy_vAucCgc59wJiSTQsgH2hP69P7PkVhbnCm-jf9j6DIAgEhABscpm6G59E6zqMz3M8qR9luHubm6j7f-FcLAohsTOa2HCp18BNzvrsBUmY3oDz9HRWCpDPkpeWZRNGauXiSZ12Ziany4iRSIWZnnO4Je6-iDbv4xw5lGA3bT-ljowUey_hm6sXx22LXCSFe_x1V9VOInJwZGL_nGLiQSSGG0mZhhO7fiL4IfCy7gTBNigW8ww";
-    order.metadata["action"] = "CREATE";
-    order.metadata["order_type"] = "limit";
-    order.metadata["quantity_value_str"] = std::to_string(quantity);
 
     return order;
 }
@@ -838,80 +759,97 @@ Order ClusterClient::create_sample_market_order(const std::string& base_token,
 }
 
 std::string ClusterClient::create_order_message(const std::string& base_token,
-                                               const std::string& quote_token,
-                                               const std::string& side, double quantity,
-                                               double limit_price) {
+                                                const std::string& quote_token,
+                                                const std::string& side, double quantity,
+                                                double /* limit_price */) {
     // Generate unique identifiers
     std::string uuid = OrderUtils::generate_uuid();
     std::string client_order_id = uuid;
-    
+
     // Get current timestamp
     auto now = std::chrono::system_clock::now();
-    auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    auto timestamp_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     std::string create_ts = std::to_string(timestamp_ms);
-    
-    // Create the complete message structure
+
+    // Create the complete message structure to match terminal output exactly
     Json::Value message;
-    
-    // Top level structure
-    message["uuid"] = uuid;
+
+    // Top level structure - matches terminal output
+    message["uuid"] = client_order_id;
     message["msg_type"] = "D";
-    
+
+    // Nested message structure
+    Json::Value nested_message;
+
     // Headers
     Json::Value headers;
     headers["origin"] = "fix";
     headers["origin_name"] = "FIX_GATEWAY";
-    headers["origin_id"] = "DEV_FIX01_TX";
-    headers["connection_uuid"] = "129725";
+    headers["origin_id"] = "SEKAR_AERON01_TX";
+    headers["connection_uuid"] = "130032";
     headers["customer_id"] = "75";
-    headers["ip_address"] = "13.127.186.179";
+    headers["ip_address"] = "10.37.62.251";
     headers["create_ts"] = create_ts;
-    headers["auth_token"] = "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhayI6IjZTYXZHSFJkMzJCVWdXZ05NdEdBQnBZV05aaFFkMUxQZ1dsbE1oOHh4RXdqUjNOMTFvaWNMcXY2STltVkZvcUYiLCJhdWQiOiJERVZfRklYMDFfVFgiLCJleHAiOjE3NTgxMDE1NzEsImlhdCI6MTc1NzkyODc3MSwic2NvcGUiOiJ3cml0ZTp0cmFkZSBjcnVkOnNlc3Npb24ifQ.UPrSbS80TZDf_0ATdMCwPHf3DUhDDqqIiszBKjTL0emMSFtP4Qq9Bl1OxjXYrFI9kUpqtwBI3qyd1SwR3n2qgqh94Wi42E4OW8QeJD-R_KTgL5rAH0Fmo0IhG4EEwtYVpISYAXkuEbIV74mjBC1uzfNaaB7SXbMUuejovZpLpWkeMFDXhbjovQjWbzde0NIjtJ5LBXSRkqe39IjFEdWpheYEUZp7gV9HcuGklkwqBA3VFVUW_OgFKxtP7BXbgmijYwb1ojxvOB_rLSewk6mCABAUZaosbi5fgZGtv6R35p0VpBPUZ3-9hRcpaPveq9XROzeTx4J-9Bgz3GseGPXcfvkUhA2qqPihh8-W79ztXLwsx3bupnizaMHFdq7b07Ta8ILrVwH8son5AX1s0aOmuHp0fykGyjVM07QGyYYia33FIE1HOnJzzK1GqEy_vAucCgc59wJiSTQsgH2hP69P7PkVhbnCm-jf9j6DIAgEhABscpm6G59E6zqMz3M8qR9luHubm6j7f-FcLAohsTOa2HCp18BNzvrsBUmY3oDz9HRWCpDPkpeWZRNGauXiSZ12Ziany4iRSIWZnnO4Je6-iDbv4xw5lGA3bT-ljowUey_hm6sXx22LXCSFe_x1V9VOInJwZGL_nGLiQSSGG0mZhhO7fiL4IfCy7gTBNigW8ww";
-    
+    headers["auth_token"] =
+        "Bearer "
+        "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJhayI6IjZTYXZHSFJkMzJCVWdXZ05NdEdBQnBZV05aaFFkMUxQZ1dsbE1oOHh4RXdqUjNOMTFvaWNMcXY2STltVk"
+        "ZvcUYiLCJhdWQiOiJTRUtBUl9BRVJPTjAxX1RYIiwiZXhwIjoxNzU4NzgxMzI5LCJpYXQiOjE3NTg2MDg1MjksInNj"
+        "b3BlIjoid3JpdGU6dHJhZGUgY3J1ZDpzZXNzaW9uIn0.X9h-"
+        "jz1NeoKJLCFtDPmcEuqOhrCdZIzWCyxOprQ1OD07TBPRIwz0hGRM2jwIrIzBkeLJ0lFuaJPA-"
+        "McjGMAkdzSozcf1d61HFK56ORfCerR_9Omgaw2EsRZv7qCkwZmBdYBbf0_7vr_"
+        "YdNiL5J7a77efZdso4Ac2k9RqmsbnDMNaPtt1nC5eMwJhdwbwzKS9NdqDXGhmuXBpVj3YcweWY2uiYYC0cpILiEcFD"
+        "-j0OGsDqM8QWC29cwyFYryjU16YGLesD7qluWzSBmbeqCHAg2F9oMKZO886hdHqtN3rqd6Oo8oDsd1F7yN00AJzICb"
+        "qKbFq8m6RzAgBxh9kNQgdwbzgkQIY-eDLPZsRf6kNLJvA-dMjuHHLu7VssrY-kRd_WX_CWnnhwP0yfQDB-"
+        "1nHHqvCjIUY_lWElnyWHtKW_7xQSDIoc8CJQ4P9xY0KPEEC-qv0kHGfvbXVEN1cqXIWdY-"
+        "vRLTQxb4Rw2YDK0yZvMJggT-"
+        "C68g6pFdTQzd5pSUVg45hDO8KIu0O90wvATvljWrfGfCryzkwWSWRKYRvUGXcBCgVipiEt-"
+        "CT7OzfeX4mZQwU56lH4_OT4DK-Sw-lw46pjxUHgKXyENnvm8cd8xf0o2CgrKX6ChJTkHExpNuOp-lHRul7V_"
+        "20MtkRVIz6Le0YtOHZK-wsFcc4UhO_r3c";
+
     // Message content
     Json::Value message_content;
     message_content["action"] = "CREATE";
-    
+
     // Order details
     Json::Value order_details;
-    
+
     // Token pair
     Json::Value token_pair;
     token_pair["base_token"] = base_token;
     token_pair["quote_token"] = quote_token;
     order_details["token_pair"] = token_pair;
-    
+
     // Quantity
     Json::Value quantity_obj;
     quantity_obj["token"] = base_token;
     quantity_obj["value"] = quantity;
     order_details["quantity"] = quantity_obj;
-    
+
     // Other order details
     order_details["side"] = side;
-    order_details["order_type"] = "limit";
-    order_details["time_in_force"] = "gtc";
-    order_details["limit_price"] = limit_price;
+    order_details["order_type"] = "market";
     order_details["quantity_value_str"] = std::to_string(quantity);
     order_details["client_order_id"] = client_order_id;
-    
+
     message_content["order_details"] = order_details;
-    
-    // Assemble the complete message
-    Json::Value complete_message;
-    complete_message["headers"] = headers;
-    complete_message["message"] = message_content;
-    
-    message["message"] = complete_message;
-    
+
+    // Assemble the nested message structure
+    nested_message["headers"] = headers;
+    nested_message["message"] = message_content;
+
+    // Final message structure
+    message["message"] = nested_message;
+
     // Convert to JSON string
     Json::StreamWriterBuilder builder;
     builder["indentation"] = "";
     std::unique_ptr<Json::StreamWriter> writer(builder.newStreamWriter());
-    
+
     std::ostringstream oss;
     writer->write(message, &oss);
-    
+
     return oss.str();
 }
 

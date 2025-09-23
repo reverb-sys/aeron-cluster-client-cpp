@@ -135,7 +135,7 @@ add_library(aeron-cluster-cpp STATIC
     src/session_manager.cpp
     src/message_handler.cpp
     src/config.cpp
-    src/order_types.cpp  # <-- Added this missing file
+    src/order_types.cpp
 )
 
 # Set target properties
