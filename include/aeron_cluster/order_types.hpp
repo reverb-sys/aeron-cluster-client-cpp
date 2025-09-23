@@ -57,6 +57,8 @@ public:
     double quote_token_usd_rate = 0.0;
     
     // Additional metadata
+    std::unordered_map<std::string, std::string> message;
+    std::unordered_map<std::string, std::string> headers;
     std::unordered_map<std::string, std::string> metadata;
 
     /**
@@ -166,7 +168,6 @@ struct OrderExecutionReport {
     std::string reject_reason;
     std::string venue;
     std::string counterparty;
-    
     std::unordered_map<std::string, std::string> metadata;
 };
 

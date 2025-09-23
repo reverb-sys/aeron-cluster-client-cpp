@@ -242,6 +242,7 @@ int main(int argc, char* argv[]) {
         auto config = ClusterClientConfigBuilder()
                           .with_cluster_endpoints(clusterEndpoints)
                           .with_aeron_dir(aeronDir)
+                          .with_debug_logging(false)
                           .with_response_timeout(std::chrono::milliseconds(connectionTimeout))
                           .with_max_retries(3)
                           .with_default_topic("order_request_topic")
@@ -261,9 +262,14 @@ int main(int argc, char* argv[]) {
         int failedOrders = 0;
 
         client.set_message_callback([&](const aeron_cluster::ParseResult& result) {
-            if (result.message_type.find("ACK") != std::string::npos ||
-                result.message_type.find("ACKNOWLEDGMENT") != std::string::npos ||
-                result.message_type.find("Acknowledgment") != std::string::npos) {
+            if (result.is_order_message()) {
+                // Handle ORDER_MESSAGE specifically
+                std::cout << "🎯 ORDER_MESSAGE received: " << result.payload.substr(0, 200) << std::endl;
+                std::cout << "   Message Type: " << result.message_type << std::endl;
+                std::cout << "   Message ID: " << result.message_id << std::endl;
+            } else if (result.is_acknowledgment()) {
+                // Handle acknowledgments
+                std::cout << "✅ Acknowledgment received" << std::endl;
                 // Parse the acknowledgment
                 if (result.payload.find("\"success\":true") != std::string::npos ||
                     result.payload.find("\"status\":\"success\"") != std::string::npos ||
@@ -279,6 +285,20 @@ int main(int argc, char* argv[]) {
                         std::cout << "   Failure details: " << result.payload.substr(0, 200)
                                   << std::endl;
                     }
+                }
+            } else if (result.is_topic_message()) {
+                // Handle other TopicMessages
+                std::cout << "📨 TopicMessage received: " << result.message_type << std::endl;
+                
+                // Check if this is actually an ORDER_MESSAGE by content
+                if (result.message_type == "CREATE_ORDER" || 
+                    result.payload.find("order_details") != std::string::npos ||
+                    result.payload.find("token_pair") != std::string::npos) {
+                    std::cout << "🎯 ORDER_MESSAGE detected by content: " << result.payload.substr(0, 200) << std::endl;
+                    std::cout << "   Message Type: " << result.message_type << std::endl;
+                    std::cout << "   Message ID: " << result.message_id << std::endl;
+                } else if (debugMode) {
+                    std::cout << "   Payload: " << result.payload.substr(0, 200) << std::endl;
                 }
             } else if (debugMode) {
                 // print all result
@@ -309,11 +329,11 @@ int main(int argc, char* argv[]) {
         std::cout << std::endl;
 
         if (clientType == "subscriber") {
-            std::cout << "📡 Subscribing to order acknowledgments..." << std::endl;
+            std::cout << "📡 Subscribing to order requests..." << std::endl;
             // Subscribe to orders topic: Send subscription request to _subscriptions topic
             client.send_subscription_request("order_request_topic", "sender_comp_id", "LATEST");
 
-            std::cout << "   Waiting for acknowledgments (no orders sent)" << std::endl;
+            std::cout << "   Waiting for orders (no orders sent)" << std::endl;
             while (running) {
                 client.poll_messages(10);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));

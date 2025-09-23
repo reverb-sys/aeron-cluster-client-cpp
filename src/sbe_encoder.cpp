@@ -9,6 +9,7 @@
 
 #include "aeron_cluster/config.hpp"
 #include "aeron_cluster/sbe_messages.hpp"
+#include "aeron_cluster/debug_utils.hpp"
 #include "model/Acknowledgment.h"
 #include "model/MessageHeader.h"
 #include "model/TopicMessage.h"
@@ -158,21 +159,17 @@ bool SBEDecoder::decode_session_event(const uint8_t* data, size_t length, Sessio
         return false;
     }
 
-    // Show raw binary data with better formatting
-    std::cout << "Raw data analysis (" << length << " bytes):" << std::endl;
-
-    // Show hex dump for first 64 bytes
-    std::cout << "Hex dump: ";
+    // Show raw binary data with better formatting (simplified for DEBUG_LOG)
+    DEBUG_LOG("Raw data analysis (", length, " bytes)");
+    // Simplified hex dump for first 64 bytes
+    DEBUG_LOG("Hex dump: ");
     for (size_t i = 0; i < length && i < 64; ++i) {
-        std::cout << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned>(data[i])
-                  << " ";
+        DEBUG_LOG("0x", static_cast<unsigned>(data[i]), " ");
         if ((i + 1) % 16 == 0)
-            std::cout << std::endl << "          ";
+            DEBUG_LOG("\n          ");
     }
-    std::cout << std::dec << std::endl;
-
     // Try to extract any readable strings
-    std::cout << "Readable content: ";
+    DEBUG_LOG("Readable content: ");
     std::string readable;
     for (size_t i = 0; i < length && i < 256; ++i) {
         char c = static_cast<char>(data[i]);
@@ -180,16 +177,14 @@ bool SBEDecoder::decode_session_event(const uint8_t* data, size_t length, Sessio
             readable += c;
         } else if (!readable.empty()) {
             if (readable.length() >= 3) {
-                std::cout << "\"" << readable << "\" ";
+                DEBUG_LOG("\"", readable, "\" ");
             }
             readable.clear();
         }
     }
     if (readable.length() >= 3) {
-        std::cout << "\"" << readable << "\"";
+        DEBUG_LOG("\"", readable, "\"");
     }
-    std::cout << std::endl;
-
     // Verify header
     MessageHeader header;
     if (!decode_message_header(data, length, header)) {
@@ -263,8 +258,7 @@ bool SBEDecoder::decode_acknowledgment(const uint8_t* data, size_t length, std::
 size_t SBEDecoder::extract_variable_string(const uint8_t* data, size_t offset,
                                            size_t remainingLength, std::string& output) {
     if (offset + sizeof(uint32_t) > remainingLength) {
-        std::cout << "[ERROR] Not enough data for length prefix at offset " << offset
-                  << ", remaining: " << remainingLength << std::endl;
+        DEBUG_LOG("[ERROR] Not enough data for length prefix at offset ", offset, ", remaining: ", remainingLength);
         return 0;  // Not enough data for length prefix
     }
 
@@ -274,15 +268,12 @@ size_t SBEDecoder::extract_variable_string(const uint8_t* data, size_t offset,
     uint32_t length;
     std::memcpy(&length, ptr, sizeof(uint32_t));
 
-    std::cout << "[DEBUG] Extracting string at offset " << offset << ", length prefix: " << length
-              << ", remaining: " << remainingLength << std::endl;
-
+    DEBUG_LOG("[DEBUG] Extracting string at offset ", offset, ", length prefix: ", length, ", remaining: ", remainingLength);
     offset += sizeof(uint32_t);
 
     // Sanity check - prevent buffer overrun
     if (length > remainingLength - sizeof(uint32_t) || length > 10 * 1024 * 1024) {  // 10MB limit
-        std::cout << "[ERROR] Invalid string length: " << length
-                  << ", remaining data: " << (remainingLength - sizeof(uint32_t)) << std::endl;
+        DEBUG_LOG("[ERROR] Invalid string length: ", length, ", remaining data: ", (remainingLength - sizeof(uint32_t)));
         return 0;
     }
 
@@ -290,10 +281,10 @@ size_t SBEDecoder::extract_variable_string(const uint8_t* data, size_t offset,
     if (length > 0) {
         output.assign(reinterpret_cast<const char*>(data + offset), length);
         offset += length;
-        std::cout << "[DEBUG] Extracted string: \"" << output << "\"" << std::endl;
+        DEBUG_LOG("[DEBUG] Extracted string: \"", output, "\"");
     } else {
         output.clear();
-        std::cout << "[DEBUG] Extracted empty string" << std::endl;
+        DEBUG_LOG("[DEBUG] Extracted empty string");
     }
 
     return offset;
@@ -507,10 +498,7 @@ ParseResult MessageParser::parse_message(const uint8_t* data, size_t length) {
         return result;
     }
 
-    std::cout << "[DEBUG] Parsed header from incoming message: block_length=" << header.block_length
-              << ", template_id=" << header.template_id << ", schema_id=" << header.schema_id
-              << ", version=" << header.version << std::endl;
-
+    DEBUG_LOG("[DEBUG] Parsed header from incoming message: block_length=", static_cast<int>(header.block_length), ", template_id=", static_cast<int>(header.template_id), ", schema_id=", static_cast<int>(header.schema_id), ", version=", static_cast<int>(header.version));
     // Extract header fields
     result.template_id = header.template_id;
     result.schema_id = header.schema_id;
@@ -519,13 +507,13 @@ ParseResult MessageParser::parse_message(const uint8_t* data, size_t length) {
 
     // Parse based on message type
     if (result.is_session_event()) {
-        std::cout << "[DEBUG] Detected Session Event, parsing..." << std::endl;
+        DEBUG_LOG("[DEBUG] Detected Session Event, parsing...");
         return parse_session_event(data, length);
     } else if (result.is_topic_message()) {
-        std::cout << "[DEBUG] Detected Topic Message, parsing..." << std::endl;
+        DEBUG_LOG("[DEBUG] Detected Topic Message, parsing...");
         return parse_topic_message(data, length);
     } else if (result.is_acknowledgment()) {
-        std::cout << "[DEBUG] Detected Acknowledgment, parsing..." << std::endl;
+        DEBUG_LOG("[DEBUG] Detected Acknowledgment, parsing...");
         return parse_acknowledgment(data, length);
     } else {
         result.error_message =
@@ -538,28 +526,21 @@ ParseResult MessageParser::parse_message(const uint8_t* data, size_t length) {
 // Rest of MessageParser methods remain the same...
 ParseResult MessageParser::parse_message_debug(const uint8_t* data, size_t length,
                                                const std::string& debugPrefix) {
-    std::cout << debugPrefix << "📋 Parsing message (" << length << " bytes)" << std::endl;
-
+    DEBUG_LOG(debugPrefix, "📋 Parsing message (", length, " bytes)");
     if (length > 0 && length <= 200) {
-        std::cout << debugPrefix << "📋 Hex dump:" << std::endl;
-        SBEUtils::print_hex_dump(data, length, debugPrefix + "  ", 64);
+        DEBUG_LOG(debugPrefix, "📋 Hex dump:");        SBEUtils::print_hex_dump(data, length, debugPrefix + "  ", 64);
     }
 
     ParseResult result = parse_message(data, length);
 
-    std::cout << debugPrefix << "📋 Parse result: " << (result.success ? "SUCCESS" : "FAILED")
-              << std::endl;
-    std::cout << debugPrefix << "📋 Description: " << result.get_description() << std::endl;
-
+    DEBUG_LOG(debugPrefix, "📋 Parse result: ", (result.success ? "SUCCESS" : "FAILED"));
+    DEBUG_LOG(debugPrefix, "📋 Description: ", result.get_description());
     if (!result.success) {
-        std::cout << debugPrefix << "📋 Error: " << result.error_message << std::endl;
-
+        DEBUG_LOG(debugPrefix, "📋 Error: ", result.error_message);
         auto strings = SBEUtils::extract_readable_strings(data, length, 3);
         if (!strings.empty()) {
-            std::cout << debugPrefix << "📋 Readable strings found:" << std::endl;
-            for (const auto& str : strings) {
-                std::cout << debugPrefix << "  \"" << str << "\"" << std::endl;
-            }
+            DEBUG_LOG(debugPrefix, "📋 Readable strings found:");            for (const auto& str : strings) {
+                DEBUG_LOG(debugPrefix, "  \"", str, "\"");            }
         }
     }
 
@@ -681,8 +662,7 @@ bool Validate_header(const MessageHeader& header, uint16_t expectedTemplateId,
 size_t Extract_variable_string(const uint8_t* data, size_t offset, size_t remainingLength,
                                std::string& output) {
     if (offset + sizeof(uint32_t) > remainingLength) {
-        std::cout << "[ERROR] Not enough data for length prefix at offset " << offset
-                  << ", remaining: " << remainingLength << std::endl;
+        DEBUG_LOG("[ERROR] Not enough data for length prefix at offset ", offset, ", remaining: ", remainingLength);
         return 0;  // Not enough data for length prefix
     }
 
@@ -692,15 +672,12 @@ size_t Extract_variable_string(const uint8_t* data, size_t offset, size_t remain
     uint32_t length;
     std::memcpy(&length, ptr, sizeof(uint32_t));
 
-    std::cout << "[DEBUG] Extracting string at offset " << offset << ", length prefix: " << length
-              << ", remaining: " << remainingLength << std::endl;
-
+    DEBUG_LOG("[DEBUG] Extracting string at offset ", offset, ", length prefix: ", length, ", remaining: ", remainingLength);
     offset += sizeof(uint32_t);
 
     // Sanity check - prevent buffer overrun
     if (length > remainingLength - sizeof(uint32_t) || length > 10 * 1024 * 1024) {  // 10MB limit
-        std::cout << "[ERROR] Invalid string length: " << length
-                  << ", remaining data: " << (remainingLength - sizeof(uint32_t)) << std::endl;
+        DEBUG_LOG("[ERROR] Invalid string length: ", length, ", remaining data: ", (remainingLength - sizeof(uint32_t)));
         return 0;
     }
 
@@ -708,11 +685,11 @@ size_t Extract_variable_string(const uint8_t* data, size_t offset, size_t remain
     if (length > 0) {
         output.assign(reinterpret_cast<const char*>(data + offset), length);
         offset += length;
-        std::cout << "[DEBUG] Extracted string: \"" << output << "\"" << std::endl;
+        DEBUG_LOG("[DEBUG] Extracted string: \"", output, "\"");
     } else {
         output.clear();
-        std::cout << "[DEBUG] Extracted empty string" << std::endl;
-    }
+        DEBUG_LOG("[DEBUG] Extracted empty string");
+        }
 
     return offset;
 }
@@ -732,21 +709,17 @@ ParseResult MessageParser::parse_topic_message(const uint8_t* data, size_t lengt
         return result;
     }
 
-    std::cout << "[DEBUG] parse_topic_message: received message:" << std::endl;
-    std::cout << "[DEBUG]   block_length=" << header.block_length << std::endl;
-    std::cout << "[DEBUG]   template_id=" << header.template_id << std::endl;
-    std::cout << "[DEBUG]   schema_id=" << header.schema_id << std::endl;
-    std::cout << "[DEBUG]   version=" << header.version << std::endl;
-    std::cout << "[DEBUG]   total_length=" << length << std::endl;
-
+    DEBUG_LOG("[DEBUG] parse_topic_message: received message:");
+    DEBUG_LOG("[DEBUG]   block_length=", static_cast<int>(header.block_length));
+    DEBUG_LOG("[DEBUG]   template_id=", static_cast<int>(header.template_id));
+    DEBUG_LOG("[DEBUG]   schema_id=", static_cast<int>(header.schema_id));
+    DEBUG_LOG("[DEBUG]   version=", static_cast<int>(header.version));
+    DEBUG_LOG("[DEBUG]   total_length=", static_cast<int>(length));
     // Print hex dump for debugging
-    std::cout << "[DEBUG] Message hex dump:" << std::endl;
-    SBEUtils::print_hex_dump(data, std::min(length, size_t(80)), "[DEBUG]   ");
 
     // Check if this is a cluster session message (schema_id=111) containing an embedded message
     if (header.schema_id == 111) {  // SBEConstants::CLUSTER_SCHEMA_ID
-        std::cout << "[DEBUG] This is a cluster session message, extracting embedded message"
-                  << std::endl;
+        DEBUG_LOG("[DEBUG] This is a cluster session message, extracting embedded message");
 
         // Session message format:
         // - MessageHeader (8 bytes)
@@ -763,14 +736,10 @@ ParseResult MessageParser::parse_topic_message(const uint8_t* data, size_t lengt
         const uint8_t* embedded_message_data = data + session_header_size;
         size_t embedded_message_length = length - session_header_size;
 
-        std::cout << "[DEBUG] Extracting embedded message:" << std::endl;
-        std::cout << "[DEBUG]   session_header_size=" << session_header_size << std::endl;
-        std::cout << "[DEBUG]   embedded_message_length=" << embedded_message_length << std::endl;
-
+        DEBUG_LOG("[DEBUG] Extracting embedded message:");
+        DEBUG_LOG("[DEBUG]   session_header_size=", static_cast<int>(session_header_size));
+        DEBUG_LOG("[DEBUG]   embedded_message_length=", static_cast<int>(embedded_message_length));
         // Print hex dump of the embedded message
-        std::cout << "[DEBUG] Embedded message hex dump:" << std::endl;
-        SBEUtils::print_hex_dump(embedded_message_data,
-                                 std::min(embedded_message_length, size_t(80)), "[DEBUG]   ");
 
         // Check if we have enough data for an embedded message header
         if (embedded_message_length < sizeof(MessageHeader)) {
@@ -786,22 +755,20 @@ ParseResult MessageParser::parse_topic_message(const uint8_t* data, size_t lengt
             return result;
         }
 
-        std::cout << "[DEBUG] Embedded message header:" << std::endl;
-        std::cout << "[DEBUG]   block_length=" << embedded_header.block_length << std::endl;
-        std::cout << "[DEBUG]   template_id=" << embedded_header.template_id << std::endl;
-        std::cout << "[DEBUG]   schema_id=" << embedded_header.schema_id << std::endl;
-        std::cout << "[DEBUG]   version=" << embedded_header.version << std::endl;
-
+        DEBUG_LOG("[DEBUG] Embedded message header:");
+        DEBUG_LOG("[DEBUG]   block_length=", static_cast<int>(embedded_header.block_length));
+        DEBUG_LOG("[DEBUG]   template_id=", static_cast<int>(embedded_header.template_id));
+        DEBUG_LOG("[DEBUG]   schema_id=", static_cast<int>(embedded_header.schema_id));
+        DEBUG_LOG("[DEBUG]   version=", static_cast<int>(embedded_header.version));
         // Route to appropriate decoder based on template_id
         if (embedded_header.schema_id == 1) {
             if (embedded_header.template_id == 1) {
                 // TopicMessage
-                std::cout << "[DEBUG] Embedded message is a TopicMessage" << std::endl;
-                return decode_topic_message_with_sbe(embedded_message_data,
-                                                     embedded_message_length);
+                DEBUG_LOG("[DEBUG] Embedded message is a TopicMessage"  );              
+            return decode_topic_message_with_sbe(embedded_message_data, embedded_message_length);
             } else if (embedded_header.template_id == 2) {
                 // Acknowledgment
-                std::cout << "[DEBUG] Embedded message is an Acknowledgment" << std::endl;
+                DEBUG_LOG("[DEBUG] Embedded message is an Acknowledgment");
                 return decode_acknowledgment_with_sbe(embedded_message_data,
                                                       embedded_message_length);
             } else {
@@ -818,10 +785,10 @@ ParseResult MessageParser::parse_topic_message(const uint8_t* data, size_t lengt
     } else if (header.schema_id == 1) {
         // Direct message (not wrapped in session)
         if (header.template_id == 1) {
-            std::cout << "[DEBUG] This is a direct TopicMessage" << std::endl;
+            DEBUG_LOG("[DEBUG] This is a direct TopicMessage");
             return decode_topic_message_with_sbe(data, length);
         } else if (header.template_id == 2) {
-            std::cout << "[DEBUG] This is a direct Acknowledgment" << std::endl;
+            DEBUG_LOG("[DEBUG] This is a direct Acknowledgment");
             return decode_acknowledgment_with_sbe(data, length);
         } else {
             result.error_message =
@@ -839,12 +806,9 @@ ParseResult MessageParser::parse_topic_message(const uint8_t* data, size_t lengt
 ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, size_t length) {
     ParseResult result;
 
-    std::cout << "[DEBUG] decode_acknowledgment_with_sbe: starting SBE decoding" << std::endl;
-    std::cout << "[DEBUG] Input data length: " << length << std::endl;
-
+    DEBUG_LOG("[DEBUG] decode_acknowledgment_with_sbe: starting SBE decoding");
+    DEBUG_LOG("[DEBUG] Input data length: ", static_cast<int>(length));
     // Print detailed hex dump to understand the structure
-    std::cout << "[DEBUG] Full acknowledgment data:" << std::endl;
-    SBEUtils::print_hex_dump(data, length, "[DEBUG]   ");
 
     try {
         // Manual header extraction first to understand the actual structure
@@ -859,12 +823,11 @@ ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, s
         uint16_t schema_id = *reinterpret_cast<const uint16_t*>(data + 4);
         uint16_t version = *reinterpret_cast<const uint16_t*>(data + 6);
 
-        std::cout << "[DEBUG] Manual header extraction:" << std::endl;
-        std::cout << "[DEBUG]   block_length=" << block_length << std::endl;
-        std::cout << "[DEBUG]   template_id=" << template_id << std::endl;
-        std::cout << "[DEBUG]   schema_id=" << schema_id << std::endl;
-        std::cout << "[DEBUG]   version=" << version << std::endl;
-
+        DEBUG_LOG("[DEBUG] Manual header extraction:");
+        DEBUG_LOG("[DEBUG]   block_length=", static_cast<int>(block_length));
+        DEBUG_LOG("[DEBUG]   template_id=", static_cast<int>(template_id));
+        DEBUG_LOG("[DEBUG]   schema_id=", static_cast<int>(schema_id));
+        DEBUG_LOG("[DEBUG]   version=", static_cast<int>(version));
         // Verify this is an Acknowledgment
         if (template_id != 2 || schema_id != 1) {
             result.error_message =
@@ -888,8 +851,7 @@ ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, s
 
         // Extract timestamp (8 bytes after header)
         uint64_t timestamp = *reinterpret_cast<const uint64_t*>(data + 8);
-        std::cout << "[DEBUG] Extracted timestamp: " << timestamp << std::endl;
-
+        DEBUG_LOG("[DEBUG] Extracted timestamp: ", static_cast<int64_t>(timestamp));
         // For now, since the SBE wrapper is failing due to incorrect block_length,
         // let's manually extract what we can and set reasonable defaults
 
@@ -902,9 +864,7 @@ ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, s
         std::vector<std::string> extracted_strings;
 
         if (remaining_offset < length) {
-            std::cout << "[DEBUG] Attempting to extract strings from remaining "
-                      << (length - remaining_offset) << " bytes" << std::endl;
-
+            DEBUG_LOG("[DEBUG] Attempting to extract strings from remaining ",(length - remaining_offset)," bytes");
             // Look for any readable strings in the remaining data
             std::string current_string;
             for (size_t i = remaining_offset; i < length; ++i) {
@@ -914,16 +874,14 @@ ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, s
                 } else {
                     if (current_string.length() >= 3) {
                         extracted_strings.push_back(current_string);
-                        std::cout << "[DEBUG] Found string: \"" << current_string << "\""
-                                  << std::endl;
+                        DEBUG_LOG("[DEBUG] Found string: \"", current_string, "\"");
                     }
                     current_string.clear();
                 }
             }
             if (current_string.length() >= 3) {
                 extracted_strings.push_back(current_string);
-                std::cout << "[DEBUG] Found final string: \"" << current_string << "\""
-                          << std::endl;
+                DEBUG_LOG("[DEBUG] Found final string: \"", current_string, "\"");
             }
         }
 
@@ -955,16 +913,14 @@ ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, s
             result.payload = "SUCCESS";
         }
 
-        std::cout << "[DEBUG] decode_acknowledgment_with_sbe: SUCCESS (manual decoding)"
-                  << std::endl;
-        std::cout << "[DEBUG]   message_id: \"" << result.message_id << "\"" << std::endl;
-        std::cout << "[DEBUG]   payload: \"" << result.payload << "\"" << std::endl;
-        std::cout << "[DEBUG]   headers: \"" << result.headers << "\"" << std::endl;
-
+        DEBUG_LOG("[DEBUG] decode_acknowledgment_with_sbe: SUCCESS (manual decoding)");
+        DEBUG_LOG("[DEBUG]   message_id: \"", result.message_id, "\"");
+        DEBUG_LOG("[DEBUG]   payload: \"", result.payload, "\"");
+        DEBUG_LOG("[DEBUG]   headers: \"", result.headers, "\"");
         return result;
 
     } catch (const std::exception& e) {
-        std::cout << "[ERROR] Exception in acknowledgment decoding: " << e.what() << std::endl;
+        DEBUG_LOG("[ERROR] Exception in acknowledgment decoding: ", e.what());
         result.error_message = "Acknowledgment decoding failed: " + std::string(e.what());
         return result;
     }
@@ -974,7 +930,7 @@ ParseResult MessageParser::decode_acknowledgment_with_sbe(const uint8_t* data, s
 ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, size_t length) {
     ParseResult result;
 
-    std::cout << "[DEBUG] decode_topic_message_with_sbe: starting SBE decoding" << std::endl;
+    DEBUG_LOG("[DEBUG] decode_topic_message_with_sbe: starting SBE decoding");
 
     try {
         char* bufferPtr = const_cast<char*>(reinterpret_cast<const char*>(data));
@@ -988,14 +944,14 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         uint16_t template_id = messageHeader.templateId();
         uint16_t schema_id = messageHeader.schemaId();
 
-        std::cout << "[DEBUG] SBE TopicMessage Header decoded: \nblock_length=" << acting_block_length << "\nversion=" << acting_version << "\ntemplate_id=" << template_id << "\nschema_id=" << schema_id << std::endl;
+        DEBUG_LOG("[DEBUG] SBE TopicMessage Header decoded: block_length=", acting_block_length, " version=", acting_version, " template_id=", template_id, " schema_id=", schema_id);
 
         if (template_id != sbe::TopicMessage::sbeTemplateId() ||
             schema_id != sbe::TopicMessage::sbeSchemaId()) {
             result.error_message =
                 "Not a TopicMessage (got template_id=" + std::to_string(template_id) +
                 ", schema_id=" + std::to_string(schema_id) + ")";
-            std::cout << "[ERROR] 12121212 " << result.error_message << std::endl;
+            DEBUG_LOG("[ERROR] 12121212 ", result.error_message);
             return result;
         }
 
@@ -1004,27 +960,13 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
 
         sbe::TopicMessage topicMessage;
 
-        std::cout << "[DEBUG] before wrapForDecode" << std::endl;
+        DEBUG_LOG("[DEBUG] before wrapForDecode");
         topicMessage.wrapForDecode(bufferPtr,
                                    sbe::MessageHeader::encodedLength(),  // start right after header
-                                   sbe::TopicMessage::sbeBlockLength(), 
+                                   acting_block_length, 
                                    acting_version,
                                    static_cast<int>(messageBodyLength));
-        std::cout << "[DEBUG] after wrapForDecode" << std::endl;
-        // print the topic message
-        std::cout << "[DEBUG] topicMessage:" << std::endl;
-        std::cout << "  timestamp=" << topicMessage.timestamp() << std::endl;
-        std::cout << "  topic=" << topicMessage.getTopicAsString() << std::endl;
-        std::cout << "  messageType=" << topicMessage.getMessageTypeAsString() << std::endl;
-        std::cout << "  uuid=" << topicMessage.getUuidAsString() << std::endl;
-        std::cout << "  payload=" << topicMessage.getPayloadAsString() << std::endl;
-
-
-        try {
-            std::cout << "  headers=" << topicMessage.getHeadersAsString() << std::endl;
-        } catch (const std::exception& e) {
-            std::cout << "[ERROR] Exception while decoding headers: " << e.what() << std::endl;
-        }
+        
 
         // Decode fields
         uint64_t timestamp = topicMessage.timestamp();
@@ -1033,6 +975,14 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         std::string uuid = topicMessage.getUuidAsString();
         std::string payload = topicMessage.getPayloadAsString();
 
+
+        DEBUG_LOG("[DEBUG] after wrapForDecode");        // print the topic message
+        DEBUG_LOG("[DEBUG] topicMessage:");
+        DEBUG_LOG("  timestamp=", timestamp);
+        DEBUG_LOG("  topic=", topic);
+        DEBUG_LOG("  messageType=", messageType);
+        DEBUG_LOG("  uuid=", uuid);
+        DEBUG_LOG("  payload=", payload);
         // Fill result
         result.success = true;
         result.template_id = template_id;
@@ -1042,14 +992,17 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         result.message_type = messageType;
         result.message_id = uuid;
         result.payload = payload;
+        result.timestamp = static_cast<int64_t>(timestamp);
+
+        // Try to decode headers separately to avoid affecting the main result
         try {
             std::string headers = topicMessage.getHeadersAsString();
-            std::cout << "[DEBUG] headers=" << headers << std::endl;
+            DEBUG_LOG("[DEBUG] headers=", headers);
             result.headers = headers;
         } catch (const std::exception& e) {
-            std::cout << "[ERROR] Exception while decoding headers: " << e.what() << std::endl;
+            DEBUG_LOG("[ERROR] Exception while decoding headers: ", e.what());
+            result.headers = "";
         }
-        result.timestamp = static_cast<int64_t>(timestamp);
 
         return result;
 

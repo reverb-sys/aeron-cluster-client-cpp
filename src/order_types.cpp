@@ -114,50 +114,64 @@ std::vector<std::string> Order::validate() const {
 }
 
 std::string Order::to_json() const {
-    Json::Value json;
+    // Build the nested message structure with headers and message objects
+    Json::Value root;
     
-    json["id"] = id;
-    json["base_token"] = base_token;
-    json["quote_token"] = quote_token;
-    json["side"] = side;
-    json["quantity"] = quantity;
-    json["quantity_token"] = quantity_token;
-    json["limit_price"] = limit_price;
-    json["limit_price_token"] = limit_price_token;
-    json["customer_id"] = static_cast<Json::Int64>(customer_id);
-    json["user_id"] = static_cast<Json::Int64>(user_id);
-    json["account_id"] = static_cast<Json::Int64>(account_id);
-    json["status"] = status;
-    json["order_type"] = order_type;
-    json["timestamp"] = static_cast<Json::Int64>(timestamp);
-    json["updated_at"] = static_cast<Json::Int64>(updated_at);
-    json["client_order_uuid"] = client_order_uuid;
-    json["time_in_force"] = time_in_force;
-    json["request_source"] = request_source;
-    json["request_channel"] = request_channel;
-    json["base_token_usd_rate"] = base_token_usd_rate;
-    json["quote_token_usd_rate"] = quote_token_usd_rate;
+    // Top level structure
+    root["uuid"] = client_order_uuid;
+    root["msg_type"] = "D";
     
-    if (stop_price.has_value()) {
-        json["stop_price"] = stop_price.value();
-    }
+    // Nested message structure
+    Json::Value nested_message;
     
-    if (expiry_timestamp.has_value()) {
-        json["expiry_timestamp"] = static_cast<Json::Int64>(expiry_timestamp.value());
-    }
+    // Headers
+    Json::Value headers;
+    headers["origin"] = "fix";
+    headers["origin_name"] = "FIX_GATEWAY";
+    headers["origin_id"] = "SEKAR_AERON01_TX";
+    headers["connection_uuid"] = "130032";
+    headers["customer_id"] = std::to_string(customer_id);
+    headers["ip_address"] = "10.37.62.251";
+    headers["create_ts"] = std::to_string(timestamp / 1000000); // Convert to milliseconds
+    headers["auth_token"] = "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhayI6IjZTYXZHSFJkMzJCVWdXZ05NdEdBQnBZV05aaFFkMUxQZ1dsbE1oOHh4RXdqUjNOMTFvaWNMcXY2STltVkZvcUYiLCJhdWQiOiJTRUtBUl9BRVJPTjAxX1RYIiwiZXhwIjoxNzU4NzgxMzI5LCJpYXQiOjE3NTg2MDg1MjksInNjb3BlIjoid3JpdGU6dHJhZGUgY3J1ZDpzZXNzaW9uIn0.X9h-jz1NeoKJLCFtDPmcEuqOhrCdZIzWCyxOprQ1OD07TBPRIwz0hGRM2jwIrIzBkeLJ0lFuaJPA-McjGMAkdzSozcf1d61HFK56ORfCerR_9Omgaw2EsRZv7qCkwZmBdYBbf0_7vr_YdNiL5J7a77efZdso4Ac2k9RqmsbnDMNaPtt1nC5eMwJhdwbwzKS9NdqDXGhmuXBpVj3YcweWY2uiYYC0cpILiEcFD-j0OGsDqM8QWC29cwyFYryjU16YGLesD7qluWzSBmbeqCHAg2F9oMKZO886hdHqtN3rqd6Oo8oDsd1F7yN00AJzICbqKbFq8m6RzAgBxh9kNQgdwbzgkQIY-eDLPZsRf6kNLJvA-dMjuHHLu7VssrY-kRd_WX_CWnnhwP0yfQDB-1nHHqvCjIUY_lWElnyWHtKW_7xQSDIoc8CJQ4P9xY0KPEEC-qv0kHGfvbXVEN1cqXIWdY-vRLTQxb4Rw2YDK0yZvMJggT-C68g6pFdTQzd5pSUVg45hDO8KIu0O90wvATvljWrfGfCryzkwWSWRKYRvUGXcBCgVipiEt-CT7OzfeX4mZQwU56lH4_OT4DK-Sw-lw46pjxUHgKXyENnvm8cd8xf0o2CgrKX6ChJTkHExpNuOp-lHRul7V_20MtkRVIz6Le0YtOHZK-wsFcc4UhO_r3c";
     
-    // Add metadata
-    if (!metadata.empty()) {
-        Json::Value metadata_json;
-        for (const auto& pair : metadata) {
-            metadata_json[pair.first] = pair.second;
-        }
-        json["metadata"] = metadata_json;
-    }
+    // Message content
+    Json::Value message_content;
+    message_content["action"] = "CREATE";
+    
+    // Order details
+    Json::Value order_details;
+    
+    // Token pair
+    Json::Value token_pair;
+    token_pair["base_token"] = base_token;
+    token_pair["quote_token"] = quote_token;
+    order_details["token_pair"] = token_pair;
+    
+    // Quantity
+    Json::Value quantity_obj;
+    quantity_obj["token"] = base_token;
+    quantity_obj["value"] = quantity;
+    order_details["quantity"] = quantity_obj;
+    
+    // Other order details
+    order_details["side"] = side;
+    order_details["order_type"] = "market";
+    order_details["quantity_value_str"] = std::to_string(quantity);
+    order_details["client_order_id"] = client_order_uuid;
+    
+    message_content["order_details"] = order_details;
+    
+    // Assemble the nested message structure
+    nested_message["headers"] = headers;
+    nested_message["message"] = message_content;
+    
+    // Final message structure
+    root["message"] = nested_message;
     
     Json::StreamWriterBuilder builder;
     builder["indentation"] = "";
-    return Json::writeString(builder, json);
+    return Json::writeString(builder, root);
 }
 
 Order Order::from_json(const std::string& json_str) {
