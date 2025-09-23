@@ -42,16 +42,6 @@ target_link_libraries(advanced_features_example
 #    set_target_warnings(advanced_features_example)
 #endif()
 
-# Production example
-add_executable(production_example
-    production_example.cpp
-)
-
-target_link_libraries(production_example
-    PRIVATE
-        aeron-cluster-cpp
-)
-
 #if(ENABLE_WARNINGS)
 #    set_target_warnings(production_example)
 #endif()
@@ -61,6 +51,5 @@ install(TARGETS
     basic_client_example
     order_publishing_example
     advanced_features_example
-    production_example
     DESTINATION ${CMAKE_INSTALL_BINDIR}/examples
 )

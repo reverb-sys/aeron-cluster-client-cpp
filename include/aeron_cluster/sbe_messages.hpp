@@ -310,23 +310,34 @@ struct ParseResult {
     }
 
     /**
-     * @brief Check if this is a topic message
+     * @brief Check if this is a topic message (including ORDER_MESSAGE)
      */
     bool is_topic_message() const {
-        if (template_id == SBEConstants::TOPIC_MESSAGE_TEMPLATE_ID &&  schema_id == SBEConstants::TOPIC_SCHEMA_ID) {
+        // Primary check: direct TopicMessage
+        if (template_id == SBEConstants::TOPIC_MESSAGE_TEMPLATE_ID && 
+            (schema_id == SBEConstants::TOPIC_SCHEMA_ID || schema_id == 1)) {
             return true;
         }
 
-        if (schema_id == SBEConstants::TOPIC_SCHEMA_ID && 
-            template_id == SBEConstants::SESSION_EVENT_TEMPLATE_ID) {
-            // Check if embedded message is a topic message
-            return true; // This would require further parsing of the embedded message
-        }
-
+        // Check for embedded TopicMessage in cluster session messages
         if (schema_id == SBEConstants::CLUSTER_SCHEMA_ID &&
             template_id == SBEConstants::TOPIC_MESSAGE_TEMPLATE_ID) {
-            // Check if embedded message is a topic message
-            return true; // This would require further parsing of the embedded message
+            return true;
+        }
+
+        // Check for embedded TopicMessage in session events
+        if (schema_id == SBEConstants::TOPIC_SCHEMA_ID && 
+            template_id == SBEConstants::SESSION_EVENT_TEMPLATE_ID) {
+            return true;
+        }
+
+        // Additional check: if message_type indicates it's a topic message
+        if (!message_type.empty() && 
+            (message_type.find("ORDER") != std::string::npos ||
+             message_type.find("TopicMessage") != std::string::npos ||
+             message_type.find("CREATE_ORDER") != std::string::npos ||
+             message_type.find("UPDATE_ORDER") != std::string::npos)) {
+            return true;
         }
 
         return false;
@@ -338,6 +349,35 @@ struct ParseResult {
     bool is_acknowledgment() const {
         return template_id == SBEConstants::ACKNOWLEDGMENT_TEMPLATE_ID && 
                schema_id == SBEConstants::TOPIC_SCHEMA_ID;
+    }
+
+    /**
+     * @brief Check if this is an ORDER_MESSAGE (TopicMessage with order content)
+     */
+    bool is_order_message() const {
+        // Check if it's a TopicMessage with order-related content
+        if (is_topic_message()) {
+            // Check message type for order-related keywords
+            if (!message_type.empty() && 
+                (message_type == "CREATE_ORDER" ||
+                 message_type.find("ORDER") != std::string::npos ||
+                 message_type.find("CREATE_ORDER") != std::string::npos ||
+                 message_type.find("UPDATE_ORDER") != std::string::npos ||
+                 message_type.find("CANCEL_ORDER") != std::string::npos)) {
+                return true;
+            }
+            
+            // Check payload for order-related content
+            if (!payload.empty() && 
+                (payload.find("order_details") != std::string::npos ||
+                 payload.find("token_pair") != std::string::npos ||
+                 payload.find("quantity") != std::string::npos ||
+                 payload.find("side") != std::string::npos ||
+                 payload.find("client_order_id") != std::string::npos)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
