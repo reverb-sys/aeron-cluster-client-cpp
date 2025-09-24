@@ -15,6 +15,12 @@
 #include "aeron_cluster/subscription.hpp"
 #include "aeron_cluster/protocol.hpp"
 
+// Forward declarations
+namespace aeron_cluster {
+    struct CommitOffset;
+    class CommitManager;
+}
+
 namespace aeron_cluster {
 
 /**
@@ -303,6 +309,28 @@ public:
     // Send subscription (_subscriptions) for a topic
     bool subscribe_topic(std::string_view topic, std::string_view resume_strategy = "LATEST");
 
+    // Send unsubscription (_subscriptions) for a topic
+    bool unsubscribe_topic(std::string_view topic);
+
+    // Send unsubscription request with message identifier
+    std::string send_unsubscription_request(const std::string& topic, const std::string& messageIdentifier = "");
+
+    // Commit a message for a specific topic
+    void commit_message(const std::string& topic, const std::string& message_id, 
+                      std::uint64_t timestamp_nanos, std::uint64_t sequence_number);
+
+    // Get last commit offset for a topic
+    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic) const;
+
+    // Send commit request for a topic
+    bool send_commit_request(const std::string& topic);
+
+    // Send commit offset for a topic
+    bool send_commit_offset(const std::string& topic, const CommitOffset& offset);
+
+    // Resume subscription from last commit for a topic
+    bool resume_from_last_commit(const std::string& topic);
+
     // Callbacks
     void on_topic_message(TopicMessageCallback cb) { handler_.set_topic_message_callback(std::move(cb)); }
     void on_ack(AckCallback cb) { handler_.set_ack_callback(std::move(cb)); }
@@ -345,6 +373,7 @@ public:
     ClusterClientConfigBuilder& with_debug_logging(bool enabled);
     ClusterClientConfigBuilder& with_application_name(const std::string& name);
     ClusterClientConfigBuilder& with_default_topic(const std::string& topic);
+    ClusterClientConfigBuilder& with_client_id(const std::string& client_id);
 
     /**
      * @brief Build the configuration

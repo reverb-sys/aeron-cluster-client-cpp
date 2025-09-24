@@ -42,6 +42,20 @@ target_link_libraries(advanced_features_example
 #    set_target_warnings(advanced_features_example)
 #endif()
 
+# Commit/Resume example
+add_executable(commit_resume_example
+    commit_resume_example.cpp
+)
+
+target_link_libraries(commit_resume_example
+    PRIVATE
+        aeron-cluster-cpp
+)
+
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(commit_resume_example)
+#endif()
+
 #if(ENABLE_WARNINGS)
 #    set_target_warnings(production_example)
 #endif()
@@ -51,5 +65,6 @@ install(TARGETS
     basic_client_example
     order_publishing_example
     advanced_features_example
+    commit_resume_example
     DESTINATION ${CMAKE_INSTALL_BINDIR}/examples
 )

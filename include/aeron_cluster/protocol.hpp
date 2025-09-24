@@ -23,6 +23,9 @@ inline constexpr const char* TOPIC_ORDER_REQUEST     = "order_request_topic";
 
 // Subscription wire contract
 inline constexpr const char* MSGTYPE_SUBSCRIPTION = "SUBSCRIPTION";
+inline constexpr const char* MSGTYPE_UNSUBSCRIBE = "UNSUBSCRIBE";
+inline constexpr const char* MSGTYPE_COMMIT = "COMMIT";
+inline constexpr const char* MSGTYPE_COMMIT_OFFSET = "COMMIT_OFFSET";
 
 // Time helpers
 inline std::uint64_t now_nanos() {
