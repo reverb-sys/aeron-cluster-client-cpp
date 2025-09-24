@@ -315,12 +315,14 @@ public:
     // Send unsubscription request with message identifier
     std::string send_unsubscription_request(const std::string& topic, const std::string& messageIdentifier = "");
 
-    // Commit a message for a specific topic
-    void commit_message(const std::string& topic, const std::string& message_id, 
-                      std::uint64_t timestamp_nanos, std::uint64_t sequence_number);
+    // Commit a message for a specific topic and message identifier
+    void commit_message(const std::string& topic, const std::string& message_identifier,
+                      const std::string& message_id, std::uint64_t timestamp_nanos, 
+                      std::uint64_t sequence_number);
 
-    // Get last commit offset for a topic
-    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic) const;
+    // Get last commit offset for a topic and message identifier
+    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic, 
+                                                 const std::string& message_identifier) const;
 
     // Send commit request for a topic
     bool send_commit_request(const std::string& topic);
@@ -328,8 +330,8 @@ public:
     // Send commit offset for a topic
     bool send_commit_offset(const std::string& topic, const CommitOffset& offset);
 
-    // Resume subscription from last commit for a topic
-    bool resume_from_last_commit(const std::string& topic);
+    // Resume subscription from last commit for a topic and message identifier
+    bool resume_from_last_commit(const std::string& topic, const std::string& message_identifier);
 
     // Callbacks
     void on_topic_message(TopicMessageCallback cb) { handler_.set_topic_message_callback(std::move(cb)); }

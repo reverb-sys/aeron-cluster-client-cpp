@@ -993,6 +993,10 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         result.message_id = uuid;
         result.payload = payload;
         result.timestamp = static_cast<int64_t>(timestamp);
+        
+        // Generate sequence number based on timestamp (nanoseconds since epoch)
+        // This provides a unique, monotonically increasing sequence
+        result.sequence_number = static_cast<std::uint64_t>(timestamp);
 
         // Try to decode headers separately to avoid affecting the main result
         try {

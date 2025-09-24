@@ -407,16 +407,18 @@ class ClusterClient::Impl {
         return message_id;
     }
 
-    void commit_message(const std::string& topic, const std::string& message_id, 
-                       std::uint64_t timestamp_nanos, std::uint64_t sequence_number) {
+    void commit_message(const std::string& topic, const std::string& message_identifier,
+                       const std::string& message_id, std::uint64_t timestamp_nanos, 
+                       std::uint64_t sequence_number) {
         if (commit_manager_) {
-            commit_manager_->commit_message(topic, message_id, timestamp_nanos, sequence_number);
+            commit_manager_->commit_message(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
         }
     }
 
-    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic) const {
+    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic, 
+                                                const std::string& message_identifier) const {
         if (commit_manager_) {
-            return commit_manager_->get_last_commit(topic);
+            return commit_manager_->get_last_commit(topic, message_identifier);
         }
         return nullptr;
     }
@@ -439,16 +441,16 @@ class ClusterClient::Impl {
         return session_manager_->send_raw_message(frame);
     }
 
-    bool resume_from_last_commit(const std::string& topic) {
+    bool resume_from_last_commit(const std::string& topic, const std::string& message_identifier) {
         if (!is_connected() || !commit_manager_) {
             return false;
         }
 
-        // Get the last commit for this topic
-        auto last_commit = commit_manager_->get_last_commit(topic);
+        // Get the last commit for this topic and message identifier
+        auto last_commit = commit_manager_->get_last_commit(topic, message_identifier);
         if (!last_commit) {
             // No previous commit, subscribe from latest
-            return send_subscription_request(topic, "", "LATEST") != "";
+            return send_subscription_request(topic, message_identifier, "LATEST") != "";
         }
 
         // Send commit offset to resume from last known position
@@ -541,16 +543,17 @@ class ClusterClient::Impl {
                 if (commit_manager_ && !result.message_id.empty()) {
                     // Extract topic from headers or use default
                     std::string topic = "default"; // Default topic
+                    std::string message_identifier = "default"; // Default identifier
                     std::uint64_t timestamp_nanos = result.timestamp;
-                    std::uint64_t sequence_number = 1; // Default sequence
+                    std::uint64_t sequence_number = result.sequence_number;
                     
-                    // Try to extract topic from headers if available
+                    // Try to extract topic and message identifier from headers if available
                     if (!result.headers.empty()) {
-                        // Parse headers to extract topic if available
-                        // For now, use default topic
+                        // Parse headers to extract topic and message identifier if available
+                        // For now, use default values
                     }
                     
-                    commit_manager_->commit_message(topic, result.message_id, timestamp_nanos, sequence_number);
+                    commit_manager_->commit_message(topic, message_identifier, result.message_id, timestamp_nanos, sequence_number);
                 }
             } else {
                 DEBUG_LOG("Failed to parse message: ", result.error_message);
@@ -778,13 +781,15 @@ std::string ClusterClient::send_unsubscription_request(const std::string& topic,
     return pImpl_->send_unsubscription_request(topic, messageIdentifier);
 }
 
-void ClusterClient::commit_message(const std::string& topic, const std::string& message_id, 
-                                  std::uint64_t timestamp_nanos, std::uint64_t sequence_number) {
-    pImpl_->commit_message(topic, message_id, timestamp_nanos, sequence_number);
+void ClusterClient::commit_message(const std::string& topic, const std::string& message_identifier,
+                                  const std::string& message_id, std::uint64_t timestamp_nanos, 
+                                  std::uint64_t sequence_number) {
+    pImpl_->commit_message(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
 }
 
-std::shared_ptr<CommitOffset> ClusterClient::get_last_commit(const std::string& topic) const {
-    return pImpl_->get_last_commit(topic);
+std::shared_ptr<CommitOffset> ClusterClient::get_last_commit(const std::string& topic, 
+                                                            const std::string& message_identifier) const {
+    return pImpl_->get_last_commit(topic, message_identifier);
 }
 
 bool ClusterClient::send_commit_request(const std::string& topic) {
@@ -795,8 +800,8 @@ bool ClusterClient::send_commit_offset(const std::string& topic, const CommitOff
     return pImpl_->send_commit_offset(topic, offset);
 }
 
-bool ClusterClient::resume_from_last_commit(const std::string& topic) {
-    return pImpl_->resume_from_last_commit(topic);
+bool ClusterClient::resume_from_last_commit(const std::string& topic, const std::string& message_identifier) {
+    return pImpl_->resume_from_last_commit(topic, message_identifier);
 }
 
 void ClusterClient::remember_outgoing(const std::string& uuid, std::uint64_t ts_nanos) {

@@ -30,16 +30,18 @@ protected:
 TEST_F(CommitResumeTest, TestCommitMessage) {
     // Test manual commit
     std::string topic = "test_topic";
+    std::string message_identifier = "sub_123";
     std::string message_id = "test_msg_123";
     std::uint64_t timestamp = 1234567890;
     std::uint64_t sequence = 1;
     
-    client_->commit_message(topic, message_id, timestamp, sequence);
+    client_->commit_message(topic, message_identifier, message_id, timestamp, sequence);
     
     // Verify commit was stored
-    auto last_commit = client_->get_last_commit(topic);
+    auto last_commit = client_->get_last_commit(topic, message_identifier);
     ASSERT_NE(last_commit, nullptr);
     EXPECT_EQ(last_commit->topic, topic);
+    EXPECT_EQ(last_commit->message_identifier, message_identifier);
     EXPECT_EQ(last_commit->message_id, message_id);
     EXPECT_EQ(last_commit->timestamp_nanos, timestamp);
     EXPECT_EQ(last_commit->sequence_number, sequence);
@@ -47,21 +49,22 @@ TEST_F(CommitResumeTest, TestCommitMessage) {
 
 TEST_F(CommitResumeTest, TestNoCommitInitially) {
     // Test that no commit exists initially
-    auto last_commit = client_->get_last_commit("nonexistent_topic");
+    auto last_commit = client_->get_last_commit("nonexistent_topic", "nonexistent_identifier");
     EXPECT_EQ(last_commit, nullptr);
 }
 
 TEST_F(CommitResumeTest, TestMultipleCommits) {
     std::string topic = "test_topic";
+    std::string message_identifier = "sub_123";
     
     // Commit first message
-    client_->commit_message(topic, "msg1", 1000, 1);
+    client_->commit_message(topic, message_identifier, "msg1", 1000, 1);
     
     // Commit second message
-    client_->commit_message(topic, "msg2", 2000, 2);
+    client_->commit_message(topic, message_identifier, "msg2", 2000, 2);
     
     // Verify last commit is the second message
-    auto last_commit = client_->get_last_commit(topic);
+    auto last_commit = client_->get_last_commit(topic, message_identifier);
     ASSERT_NE(last_commit, nullptr);
     EXPECT_EQ(last_commit->message_id, "msg2");
     EXPECT_EQ(last_commit->timestamp_nanos, 2000);
@@ -69,18 +72,42 @@ TEST_F(CommitResumeTest, TestMultipleCommits) {
 }
 
 TEST_F(CommitResumeTest, TestDifferentTopics) {
-    // Test commits for different topics
-    client_->commit_message("topic1", "msg1", 1000, 1);
-    client_->commit_message("topic2", "msg2", 2000, 2);
+    // Test commits for different topics with same message identifier
+    std::string message_identifier = "sub_123";
+    client_->commit_message("topic1", message_identifier, "msg1", 1000, 1);
+    client_->commit_message("topic2", message_identifier, "msg2", 2000, 2);
     
-    auto commit1 = client_->get_last_commit("topic1");
-    auto commit2 = client_->get_last_commit("topic2");
+    auto commit1 = client_->get_last_commit("topic1", message_identifier);
+    auto commit2 = client_->get_last_commit("topic2", message_identifier);
     
     ASSERT_NE(commit1, nullptr);
     ASSERT_NE(commit2, nullptr);
     
     EXPECT_EQ(commit1->message_id, "msg1");
     EXPECT_EQ(commit2->message_id, "msg2");
+    EXPECT_NE(commit1->message_id, commit2->message_id);
+}
+
+TEST_F(CommitResumeTest, TestDifferentMessageIdentifiers) {
+    // Test commits for same topic with different message identifiers
+    std::string topic = "test_topic";
+    std::string identifier1 = "sub_123";
+    std::string identifier2 = "sub_456";
+    
+    client_->commit_message(topic, identifier1, "msg1", 1000, 1);
+    client_->commit_message(topic, identifier2, "msg2", 2000, 2);
+    
+    // Verify each identifier has its own commit for the same topic
+    auto commit1 = client_->get_last_commit(topic, identifier1);
+    auto commit2 = client_->get_last_commit(topic, identifier2);
+    
+    ASSERT_NE(commit1, nullptr);
+    ASSERT_NE(commit2, nullptr);
+    
+    EXPECT_EQ(commit1->message_id, "msg1");
+    EXPECT_EQ(commit1->message_identifier, identifier1);
+    EXPECT_EQ(commit2->message_id, "msg2");
+    EXPECT_EQ(commit2->message_identifier, identifier2);
     EXPECT_NE(commit1->message_id, commit2->message_id);
 }
 
@@ -113,7 +140,7 @@ TEST_F(CommitResumeTest, DISABLED_TestResumeFromCommit) {
     client_->commit_message(topic, "resume_msg", 3000, 3);
     
     // Resume from last commit
-    EXPECT_TRUE(client_->resume_from_last_commit(topic));
+    EXPECT_TRUE(client_->resume_from_last_commit(topic, "sub_123"));
 }
 
 TEST_F(CommitResumeTest, DISABLED_TestResumeWithoutCommit) {
@@ -125,7 +152,7 @@ TEST_F(CommitResumeTest, DISABLED_TestResumeWithoutCommit) {
     std::string topic = "new_topic";
     
     // Resume without previous commit should fallback to LATEST
-    EXPECT_TRUE(client_->resume_from_last_commit(topic));
+    EXPECT_TRUE(client_->resume_from_last_commit(topic, "sub_123"));
 }
 
 int main(int argc, char** argv) {
