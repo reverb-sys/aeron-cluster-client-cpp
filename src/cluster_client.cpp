@@ -15,6 +15,8 @@
 #include "aeron_cluster/ack_decoder.hpp"  // dual-path ACK decoding (simple + full SBE)
 #include "aeron_cluster/debug_utils.hpp"
 #include "aeron_cluster/protocol.hpp"  // constants: template ids, schema id, etc.
+#include "aeron_cluster/commit_manager.hpp"
+#include <memory>
 
 // Removed conflicting declaration header
 #include "aeron_cluster/protocol.hpp"
@@ -75,6 +77,7 @@ class ClusterClient::Impl {
     explicit Impl(const ClusterClientConfig& config)
         : config_(config),
           session_manager_(std::make_unique<SessionManager>(config)),
+          commit_manager_(std::make_unique<CommitManager>()),
           connection_state_(ConnectionState::DISCONNECTED),
           auto_reconnect_enabled_(false) {}
 
@@ -367,11 +370,97 @@ class ClusterClient::Impl {
         });
     }
 
+    std::string send_unsubscription_request(const std::string& topic, const std::string& messageIdentifier = "") {
+        if (!is_connected()) {
+            throw NotConnectedException();
+        }
+
+        std::string message_id = OrderUtils::generate_message_id("msg");
+        std::string message_type = "UNSUBSCRIBE";
+
+        Json::Value headers;
+        headers["messageId"] = message_id;
+        headers["topic"] = "_subscriptions";
+
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        std::string headers_json = Json::writeString(builder, headers);
+
+        Json::Value payload;
+        payload["topic"] = topic;
+        payload["action"] = "UNSUBSCRIBE";
+        payload["messageIdentifier"] = messageIdentifier.empty() ? Json::Value::null : Json::Value(messageIdentifier);
+        std::string payload_json = Json::writeString(builder, payload);
+        
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix
+                      << " Sending unsubscription request for topic: " << topic
+                      << " (MessageID: " << message_id << ")" << std::endl;
+        }
+
+        if (!session_manager_->publish_message("_subscriptions", message_type, message_id,
+                                               payload_json, headers_json)) {
+            throw ClusterClientException("Failed to send unsubscription request");
+        }
+
+        stats_.messages_sent++;
+        return message_id;
+    }
+
+    void commit_message(const std::string& topic, const std::string& message_id, 
+                       std::uint64_t timestamp_nanos, std::uint64_t sequence_number) {
+        if (commit_manager_) {
+            commit_manager_->commit_message(topic, message_id, timestamp_nanos, sequence_number);
+        }
+    }
+
+    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic) const {
+        if (commit_manager_) {
+            return commit_manager_->get_last_commit(topic);
+        }
+        return nullptr;
+    }
+
+    bool send_commit_request(const std::string& topic) {
+        if (!is_connected() || !commit_manager_) {
+            return false;
+        }
+
+        auto frame = commit_manager_->build_commit_message(topic, config_.client_id);
+        return session_manager_->send_raw_message(frame);
+    }
+
+    bool send_commit_offset(const std::string& topic, const CommitOffset& offset) {
+        if (!is_connected() || !commit_manager_) {
+            return false;
+        }
+
+        auto frame = commit_manager_->build_commit_offset_message(topic, config_.client_id, offset);
+        return session_manager_->send_raw_message(frame);
+    }
+
+    bool resume_from_last_commit(const std::string& topic) {
+        if (!is_connected() || !commit_manager_) {
+            return false;
+        }
+
+        // Get the last commit for this topic
+        auto last_commit = commit_manager_->get_last_commit(topic);
+        if (!last_commit) {
+            // No previous commit, subscribe from latest
+            return send_subscription_request(topic, "", "LATEST") != "";
+        }
+
+        // Send commit offset to resume from last known position
+        return send_commit_offset(topic, *last_commit);
+    }
+
    private:
     ClusterClientConfig config_;
     std::unique_ptr<SessionManager> session_manager_;
     std::shared_ptr<aeron::Aeron> aeron_;
     std::shared_ptr<aeron::Subscription> egress_subscription_;
+    std::unique_ptr<CommitManager> commit_manager_;
 
     std::atomic<ConnectionState> connection_state_;
     ConnectionStats stats_;
@@ -446,6 +535,22 @@ class ClusterClient::Impl {
                 // Call the message callback for all successful messages
                 if (message_callback_) {
                     message_callback_(result);
+                }
+
+                // Auto-commit the message if it has a message ID
+                if (commit_manager_ && !result.message_id.empty()) {
+                    // Extract topic from headers or use default
+                    std::string topic = "default"; // Default topic
+                    std::uint64_t timestamp_nanos = result.timestamp;
+                    std::uint64_t sequence_number = 1; // Default sequence
+                    
+                    // Try to extract topic from headers if available
+                    if (!result.headers.empty()) {
+                        // Parse headers to extract topic if available
+                        // For now, use default topic
+                    }
+                    
+                    commit_manager_->commit_message(topic, result.message_id, timestamp_nanos, sequence_number);
                 }
             } else {
                 DEBUG_LOG("Failed to parse message: ", result.error_message);
@@ -660,8 +765,38 @@ std::string ClusterClient::publish_topic(std::string_view topic, std::string_vie
 }
 
 bool ClusterClient::subscribe_topic(std::string_view topic, std::string_view resume_strategy) {
-    auto frame = build_subscription_message(topic, cfg_.client_id, resume_strategy);
-    return offer_ingress(frame.data(), frame.size());
+    std::string message_id = pImpl_->send_subscription_request(std::string(topic), "", std::string(resume_strategy));
+    return !message_id.empty();
+}
+
+bool ClusterClient::unsubscribe_topic(std::string_view topic) {
+    std::string message_id = pImpl_->send_unsubscription_request(std::string(topic), "");
+    return !message_id.empty();
+}
+
+std::string ClusterClient::send_unsubscription_request(const std::string& topic, const std::string& messageIdentifier) {
+    return pImpl_->send_unsubscription_request(topic, messageIdentifier);
+}
+
+void ClusterClient::commit_message(const std::string& topic, const std::string& message_id, 
+                                  std::uint64_t timestamp_nanos, std::uint64_t sequence_number) {
+    pImpl_->commit_message(topic, message_id, timestamp_nanos, sequence_number);
+}
+
+std::shared_ptr<CommitOffset> ClusterClient::get_last_commit(const std::string& topic) const {
+    return pImpl_->get_last_commit(topic);
+}
+
+bool ClusterClient::send_commit_request(const std::string& topic) {
+    return pImpl_->send_commit_request(topic);
+}
+
+bool ClusterClient::send_commit_offset(const std::string& topic, const CommitOffset& offset) {
+    return pImpl_->send_commit_offset(topic, offset);
+}
+
+bool ClusterClient::resume_from_last_commit(const std::string& topic) {
+    return pImpl_->resume_from_last_commit(topic);
 }
 
 void ClusterClient::remember_outgoing(const std::string& uuid, std::uint64_t ts_nanos) {
@@ -916,6 +1051,12 @@ ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_application_name(
 ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_default_topic(
     const std::string& topic) {
     config_.default_topic = topic;
+    return *this;
+}
+
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_client_id(
+    const std::string& client_id) {
+    config_.client_id = client_id;
     return *this;
 }
 
