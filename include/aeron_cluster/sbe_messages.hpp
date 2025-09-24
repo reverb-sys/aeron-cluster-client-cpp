@@ -287,6 +287,7 @@ struct ParseResult {
     std::string payload;
     std::string headers;
     std::int64_t timestamp = 0;
+    std::uint64_t sequence_number = 0;
 
     // Header information
     std::uint16_t template_id = 0;

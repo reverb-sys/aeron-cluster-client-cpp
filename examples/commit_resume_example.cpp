@@ -25,10 +25,11 @@ int main() {
     // Set up message callback
     client.set_message_callback([](const ParseResult& result) {
         std::cout << "Received message: " << result.message_type 
-                  << " (ID: " << result.message_id << ")" << std::endl;
+                  << " (ID: " << result.message_id 
+                  << ", Seq: " << result.sequence_number << ")" << std::endl;
         
-        // The message is automatically committed by the client
-        std::cout << "Message automatically committed" << std::endl;
+        // The message is automatically committed by the client with the sequence number
+        std::cout << "Message automatically committed with sequence: " << result.sequence_number << std::endl;
     });
 
     // Connect to cluster
@@ -63,20 +64,24 @@ int main() {
     // Demonstrate commit functionality
     std::cout << "\n--- Commit Functionality Demo ---" << std::endl;
     
-    // Manually commit a message
+    // Manually commit a message with message identifier
     std::string message_id = "test_msg_123";
+    std::string message_identifier = "sub_123";
     std::uint64_t timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    std::uint64_t sequence = 1;
+    std::uint64_t sequence = timestamp; // Use timestamp as sequence number
     
-    client.commit_message(topic, message_id, timestamp, sequence);
-    std::cout << "Manually committed message: " << message_id << std::endl;
+    client.commit_message(topic, message_identifier, message_id, timestamp, sequence);
+    std::cout << "Manually committed message: " << message_id 
+              << " with identifier: " << message_identifier
+              << " and sequence: " << sequence << std::endl;
 
-    // Get last commit
-    auto last_commit = client.get_last_commit(topic);
+    // Get last commit for specific message identifier
+    auto last_commit = client.get_last_commit(topic, message_identifier);
     if (last_commit) {
-        std::cout << "Last commit for topic '" << topic << "':" << std::endl;
+        std::cout << "Last commit for topic '" << topic << "' with identifier '" << message_identifier << "':" << std::endl;
         std::cout << "  Message ID: " << last_commit->message_id << std::endl;
+        std::cout << "  Message Identifier: " << last_commit->message_identifier << std::endl;
         std::cout << "  Timestamp: " << last_commit->timestamp_nanos << std::endl;
         std::cout << "  Sequence: " << last_commit->sequence_number << std::endl;
     }
@@ -92,8 +97,9 @@ int main() {
 
     // Demonstrate resume functionality
     std::cout << "\n--- Resume Demo ---" << std::endl;
-    std::cout << "Resuming subscription from last commit..." << std::endl;
-    if (client.resume_from_last_commit(topic)) {
+    std::cout << "Resuming subscription from last commit for topic: " << topic 
+              << " with identifier: " << message_identifier << std::endl;
+    if (client.resume_from_last_commit(topic, message_identifier)) {
         std::cout << "Successfully resumed from last commit" << std::endl;
     } else {
         std::cout << "No previous commit found, subscribing from latest" << std::endl;

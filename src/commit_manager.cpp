@@ -12,15 +12,19 @@ CommitManager::CommitManager() = default;
 
 CommitManager::~CommitManager() = default;
 
-void CommitManager::commit_message(const std::string& topic, const std::string& message_id, 
-                                  std::uint64_t timestamp_nanos, std::uint64_t sequence_number) {
+void CommitManager::commit_message(const std::string& topic, const std::string& message_identifier,
+                                  const std::string& message_id, std::uint64_t timestamp_nanos, 
+                                  std::uint64_t sequence_number) {
     std::lock_guard<std::mutex> lock(commits_mutex_);
-    commits_[topic] = CommitOffset(topic, message_id, timestamp_nanos, sequence_number);
+    std::string commit_key = topic + ":" + message_identifier;
+    commits_[commit_key] = CommitOffset(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
 }
 
-std::shared_ptr<CommitOffset> CommitManager::get_last_commit(const std::string& topic) const {
+std::shared_ptr<CommitOffset> CommitManager::get_last_commit(const std::string& topic, 
+                                                           const std::string& message_identifier) const {
     std::lock_guard<std::mutex> lock(commits_mutex_);
-    auto it = commits_.find(topic);
+    std::string commit_key = topic + ":" + message_identifier;
+    auto it = commits_.find(commit_key);
     if (it != commits_.end()) {
         return std::make_shared<CommitOffset>(it->second);
     }
@@ -139,6 +143,7 @@ CommitOffset CommitManager::parse_commit_offset(const std::string& payload) {
 
     CommitOffset offset;
     offset.topic = root.get("topic", "").asString();
+    offset.message_identifier = root.get("message_identifier", "").asString();
     offset.message_id = root.get("message_id", "").asString();
     offset.timestamp_nanos = root.get("timestamp_nanos", 0).asUInt64();
     offset.sequence_number = root.get("sequence_number", 0).asUInt64();
@@ -149,6 +154,7 @@ CommitOffset CommitManager::parse_commit_offset(const std::string& payload) {
 std::string CommitManager::serialize_commit_offset(const CommitOffset& offset) {
     Json::Value root;
     root["topic"] = offset.topic;
+    root["message_identifier"] = offset.message_identifier;
     root["message_id"] = offset.message_id;
     root["timestamp_nanos"] = static_cast<Json::UInt64>(offset.timestamp_nanos);
     root["sequence_number"] = static_cast<Json::UInt64>(offset.sequence_number);

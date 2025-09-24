@@ -16,13 +16,15 @@ namespace aeron_cluster {
  */
 struct CommitOffset {
     std::string topic;
+    std::string message_identifier;
     std::string message_id;
     std::uint64_t timestamp_nanos;
     std::uint64_t sequence_number;
     
     CommitOffset() = default;
-    CommitOffset(const std::string& t, const std::string& mid, std::uint64_t ts, std::uint64_t seq)
-        : topic(t), message_id(mid), timestamp_nanos(ts), sequence_number(seq) {}
+    CommitOffset(const std::string& t, const std::string& mi, const std::string& mid, 
+                 std::uint64_t ts, std::uint64_t seq)
+        : topic(t), message_identifier(mi), message_id(mid), timestamp_nanos(ts), sequence_number(seq) {}
 };
 
 /**
@@ -47,21 +49,25 @@ public:
     CommitManager& operator=(CommitManager&&) = delete;
 
     /**
-     * @brief Commit a message for a specific topic
+     * @brief Commit a message for a specific topic and message identifier
      * @param topic Topic name
+     * @param message_identifier Message identifier (e.g., "sub_123")
      * @param message_id Message ID to commit
      * @param timestamp_nanos Message timestamp
      * @param sequence_number Message sequence number
      */
-    void commit_message(const std::string& topic, const std::string& message_id, 
-                      std::uint64_t timestamp_nanos, std::uint64_t sequence_number);
+    void commit_message(const std::string& topic, const std::string& message_identifier,
+                      const std::string& message_id, std::uint64_t timestamp_nanos, 
+                      std::uint64_t sequence_number);
 
     /**
-     * @brief Get the last committed offset for a topic
+     * @brief Get the last committed offset for a topic and message identifier
      * @param topic Topic name
+     * @param message_identifier Message identifier (e.g., "sub_123")
      * @return Last commit offset, or nullptr if no commits exist
      */
-    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic) const;
+    std::shared_ptr<CommitOffset> get_last_commit(const std::string& topic, 
+                                                 const std::string& message_identifier) const;
 
     /**
      * @brief Get all committed topics and their offsets
