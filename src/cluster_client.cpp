@@ -287,11 +287,39 @@ class ClusterClient::Impl {
         return message_id;
     }
 
+    std::string publish_message_to_topic(const std::string& message_type, const std::string& payload,
+        const std::string& headers, const std::string& topic) {
+        if (!is_connected()) {
+        throw NotConnectedException();
+        }
+
+        if (topic.empty()) {
+            throw InvalidMessageException("Topic is empty");
+        }
+
+        std::string message_id = OrderUtils::generate_message_id("msg");
+
+        if (!session_manager_->publish_message(topic, message_type, message_id,
+                            payload, headers)) {
+        throw ClusterClientException("Failed to publish message");
+        }
+
+        stats_.messages_sent++;
+        return message_id;
+    }
+
     std::future<std::string> publish_message_async(const std::string& message_type,
                                                    const std::string& payload,
                                                    const std::string& headers) {
         return std::async(std::launch::async, [this, message_type, payload, headers]() {
             return publish_message(message_type, payload, headers);
+        });
+    }
+
+    std::future<std::string> publish_message_to_topic_async(const std::string& message_type,
+        const std::string& payload, const std::string& headers, const std::string& topic) {
+        return std::async(std::launch::async, [this, message_type, payload, headers, topic]() {
+            return publish_message_to_topic(message_type, payload, headers, topic);
         });
     }
 

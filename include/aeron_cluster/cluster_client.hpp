@@ -198,6 +198,20 @@ public:
         const std::string& payload,
         const std::string& headers = "{}");
 
+    
+    /**
+     * @brief Publish a custom message to a specific topic
+     * @param message_type Type identifier for the message
+     * @param payload JSON payload string
+     * @param headers Optional headers as JSON string
+     * @param topic Topic name to publish to
+     * @return Message ID for tracking acknowledgments
+     * @throws NotConnectedException if not connected
+     */
+    std::string publish_message_to_topic(
+        const std::string& message_type,
+        const std::string& payload,
+        const std::string& headers, const std::string& topic);
     /**
      * @brief Publish a custom message asynchronously
      */
@@ -205,6 +219,19 @@ public:
         const std::string& message_type,
         const std::string& payload,
         const std::string& headers = "{}");
+
+    /**
+     * @brief Publish a custom message asynchronously to a specific topic
+     * @param message_type Type identifier for the message
+     * @param payload JSON payload string
+     * @param headers Optional headers as JSON string
+     * @param topic Topic name to publish to
+     * @return Future that resolves to the message ID
+     */
+    std::future<std::string> publish_message_to_topic_async(
+        const std::string& message_type,
+        const std::string& payload,
+        const std::string& headers, const std::string& topic);
 
     /**
      * @brief Wait for acknowledgment of a specific message
