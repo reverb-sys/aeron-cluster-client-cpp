@@ -1034,10 +1034,20 @@ std::string ClusterClient::publish_message(const std::string& message_type,
     return pImpl_->publish_message(message_type, payload, headers);
 }
 
+std::string ClusterClient::publish_message_to_topic(const std::string& message_type,
+                                                   const std::string& payload, const std::string& headers, const std::string& topic) {
+    return pImpl_->publish_message_to_topic(message_type, payload, headers, topic);
+}
+
 std::future<std::string> ClusterClient::publish_message_async(const std::string& message_type,
                                                               const std::string& payload,
                                                               const std::string& headers) {
     return pImpl_->publish_message_async(message_type, payload, headers);
+}
+
+std::future<std::string> ClusterClient::publish_message_to_topic_async(const std::string& message_type,
+    const std::string& payload, const std::string& headers, const std::string& topic) {
+    return pImpl_->publish_message_to_topic_async(message_type, payload, headers, topic);
 }
 
 bool ClusterClient::wait_for_acknowledgment(const std::string& message_id,
