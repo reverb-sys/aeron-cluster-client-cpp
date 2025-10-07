@@ -152,12 +152,29 @@ public:
     std::string publish_order(const Order& order);
 
     /**
+     * @brief Publish a trading order to a specific topic
+     * @param order Order structure with all required fields
+     * @param topic Topic name to publish to
+     * @return Message ID for tracking acknowledgments
+     * @throws NotConnectedException if not connected
+     * @throws InvalidMessageException if order validation fails
+     */
+    std::string publish_order_to_topic(const Order& order, const std::string& topic);
+
+    /**
      * @brief Publish a trading order asynchronously
      * @param order Order structure with all required fields
      * @return Future that resolves to the message ID
      */
     std::future<std::string> publish_order_async(const Order& order);
 
+    /**
+     * @brief Publish a trading order asynchronously to a specific topic
+     * @param order Order structure with all required fields
+     * @param topic Topic name to publish to
+     * @return Future that resolves to the message ID
+     */
+    std::future<std::string> publish_order_to_topic_async(const Order& order, const std::string& topic);
 
     /**
      * @brief Send a subscription request to a specific topic
