@@ -545,6 +545,7 @@ class SessionManager::Impl {
         }
     }
 
+   public:
     bool send_combined_message(const std::vector<std::uint8_t>& business_message) {
         if (!is_connected()) {
             return false;
@@ -855,6 +856,10 @@ bool SessionManager::publish_message(const std::string& topic, const std::string
 
 bool SessionManager::send_raw_message(const std::vector<std::uint8_t>& encoded_message) {
     return pImpl_->send_raw_message(encoded_message);
+}
+
+bool SessionManager::send_combined_message(const std::vector<std::uint8_t>& business_message) {
+    return pImpl_->send_combined_message(business_message);
 }
 
 bool SessionManager::send_keepalive() {
