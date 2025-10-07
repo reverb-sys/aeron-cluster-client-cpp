@@ -1,6 +1,7 @@
 #include "aeron_cluster/commit_manager.hpp"
 #include "aeron_cluster/subscription.hpp"
 #include <json/json.h>
+#include <iostream>
 #include <sstream>
 #include <memory>
 #include <unordered_map>
@@ -91,8 +92,22 @@ std::vector<std::uint8_t> CommitManager::build_commit_message(const std::string&
 
 std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::string& topic, const std::string& client_id, 
                                                                     const CommitOffset& offset) const {
-    // JSON payload with commit offset information
-    std::string payload = serialize_commit_offset(offset);
+    // Create the commit offset message in the same format as Go client
+    Json::Value commitMessage;
+    commitMessage["action"] = "COMMIT_OFFSET";
+    commitMessage["topic"] = offset.topic;
+    commitMessage["message_id"] = offset.message_id;
+    commitMessage["timestamp_nanos"] = static_cast<Json::UInt64>(offset.timestamp_nanos);
+    commitMessage["sequence_number"] = static_cast<Json::Int>(offset.sequence_number);
+    commitMessage["messageIdentifier"] = offset.message_identifier;
+
+    // Convert to JSON string
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    std::string messageJson = Json::writeString(builder, commitMessage);
+
+    // Debug: Print the commit offset payload being sent
+    std::cout << "[DEBUG] Sending commit offset payload: " << messageJson << std::endl;
 
     // Prepare buffer (oversized to avoid reallocs)
     std::vector<std::uint8_t> buf;
@@ -112,6 +127,7 @@ std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::
 
     msg.timestamp(now_nanos());
 
+    // Use the same approach as Go client: send to _subscriptions topic with COMMIT_OFFSET message type
     msg.putTopic(TOPIC_SUBSCRIPTIONS, static_cast<std::uint16_t>(std::char_traits<char>::length(TOPIC_SUBSCRIPTIONS)));
     msg.putMessageType(MSGTYPE_COMMIT_OFFSET, static_cast<std::uint16_t>(std::char_traits<char>::length(MSGTYPE_COMMIT_OFFSET)));
 
@@ -121,7 +137,8 @@ std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::
         msg.putUuid(uuid.c_str(), static_cast<std::uint16_t>(uuid.size()));
     }
 
-    msg.putPayload(payload.data(), static_cast<std::uint16_t>(payload.size()));
+    // Set payload to the JSON message (same as Go client)
+    msg.putPayload(messageJson.data(), static_cast<std::uint16_t>(messageJson.size()));
     static const char emptyHeaders[] = "{}";
     msg.putHeaders(emptyHeaders, 2);
 
@@ -153,8 +170,9 @@ CommitOffset CommitManager::parse_commit_offset(const std::string& payload) {
 
 std::string CommitManager::serialize_commit_offset(const CommitOffset& offset) {
     Json::Value root;
-    root["topic"] = offset.topic;
-    root["message_identifier"] = offset.message_identifier;
+    root["action"] = "COMMIT_OFFSET";  // Add action field like Go implementation
+    root["topic"] = offset.topic;  // Use the actual topic, not _subscriptions
+    root["messageIdentifier"] = offset.message_identifier;  // Use messageIdentifier like Go
     root["message_id"] = offset.message_id;
     root["timestamp_nanos"] = static_cast<Json::UInt64>(offset.timestamp_nanos);
     root["sequence_number"] = static_cast<Json::UInt64>(offset.sequence_number);

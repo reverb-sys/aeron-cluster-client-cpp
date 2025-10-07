@@ -10,6 +10,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "aeron_cluster/ack_decoder.hpp"  // dual-path ACK decoding (simple + full SBE)
@@ -17,6 +18,8 @@
 #include "aeron_cluster/protocol.hpp"  // constants: template ids, schema id, etc.
 #include "aeron_cluster/commit_manager.hpp"
 #include <memory>
+#include <mutex>
+#include <unordered_set>
 
 // Removed conflicting declaration header
 #include "aeron_cluster/protocol.hpp"
@@ -127,6 +130,9 @@ class ClusterClient::Impl {
             stats_.current_leader_id = result.leader_member_id;
             stats_.connection_established_time = std::chrono::steady_clock::now();
             stats_.is_connected = true;
+
+            // Resume from last commit for subscribed topics
+            resume_subscribed_topics();
 
             set_connection_state(ConnectionState::CONNECTED);
             return true;
@@ -279,6 +285,9 @@ class ClusterClient::Impl {
             throw ClusterClientException("Failed to send subscription request");
         }
 
+        // Track subscribed topic
+        add_subscribed_topic(topic);
+
         stats_.messages_sent++;
         return message_id;
     }
@@ -329,17 +338,20 @@ class ClusterClient::Impl {
         }
 
         int messages_processed = 0;
+        int max_to_process = (max_messages > 0) ? max_messages : PerformanceConfig::DEFAULT_POLL_BATCH_SIZE;
 
         try {
-            // Use optimized batch processing
+            // Use optimized batch processing with message limit
             const int fragments = MessageBatchProcessor::process_batch(
                 *egress_subscription_,
                 [this](aeron::AtomicBuffer& buffer, aeron::util::index_t offset,
                        aeron::util::index_t length, aeron::logbuffer::Header& header) {
                     egress_reassembler_->onFragment(buffer, offset, length, header);
                 });
-            messages_processed += fragments;
-            stats_.messages_received += fragments;
+            
+            // Limit the number of messages processed
+            messages_processed = std::min(fragments, max_to_process);
+            stats_.messages_received += messages_processed;
         } catch (const std::exception& e) {
             DEBUG_LOG("Error polling messages: ", e.what());
         }
@@ -403,6 +415,9 @@ class ClusterClient::Impl {
             throw ClusterClientException("Failed to send unsubscription request");
         }
 
+        // Remove topic from tracking
+        remove_subscribed_topic(topic);
+
         stats_.messages_sent++;
         return message_id;
     }
@@ -433,12 +448,31 @@ class ClusterClient::Impl {
     }
 
     bool send_commit_offset(const std::string& topic, const CommitOffset& offset) {
+        if (config_.debug_logging) {
+            DEBUG_LOG("send_commit_offset called: is_connected=", is_connected(), 
+                     " has_commit_manager=", (commit_manager_ != nullptr),
+                     " has_session_manager=", (session_manager_ != nullptr),
+                     " session_id=", get_session_id());
+        }
+        
         if (!is_connected() || !commit_manager_) {
+            if (config_.debug_logging) {
+                DEBUG_LOG("send_commit_offset failed: not connected or no commit manager");
+            }
             return false;
         }
 
         auto frame = commit_manager_->build_commit_offset_message(topic, config_.client_id, offset);
-        return session_manager_->send_raw_message(frame);
+        
+        // CRITICAL FIX: Use send_combined_message() instead of send_raw_message()
+        // to include the session envelope wrapper that the cluster expects
+        bool result = session_manager_->send_combined_message(frame);
+        
+        if (config_.debug_logging) {
+            DEBUG_LOG("send_commit_offset result: ", result, " session_id: ", get_session_id());
+        }
+        
+        return result;
     }
 
     bool resume_from_last_commit(const std::string& topic, const std::string& message_identifier) {
@@ -455,6 +489,202 @@ class ClusterClient::Impl {
 
         // Send commit offset to resume from last known position
         return send_commit_offset(topic, *last_commit);
+    }
+
+    // Message deduplication helpers
+    bool is_message_processed(const std::string& message_id) {
+        std::lock_guard<std::mutex> lock(message_mutex_);
+        return processed_messages_.find(message_id) != processed_messages_.end();
+    }
+
+    void mark_message_processed(const std::string& message_id) {
+        std::lock_guard<std::mutex> lock(message_mutex_);
+        processed_messages_.insert(message_id);
+        
+        // Cleanup old messages to prevent memory leak (keep last 1000)
+        if (processed_messages_.size() > 1000) {
+            // Remove oldest entries (simple cleanup - remove first 100)
+            int count = 0;
+            for (auto it = processed_messages_.begin(); it != processed_messages_.end() && count < 100; ) {
+                it = processed_messages_.erase(it);
+                count++;
+            }
+        }
+    }
+
+    // Extract topic from message - try multiple sources
+    std::string extract_topic_from_message(const ParseResult& result) {
+        // First try to extract from headers JSON
+        if (!result.headers.empty()) {
+            try {
+                Json::Value root;
+                Json::CharReaderBuilder builder;
+                std::string errors;
+                std::istringstream stream(result.headers);
+                
+                if (Json::parseFromStream(builder, stream, &root, &errors)) {
+                    if (root.isMember("topic")) {
+                        return root["topic"].asString();
+                    }
+                }
+            } catch (const std::exception& e) {
+                DEBUG_LOG("Failed to parse headers for topic: ", e.what());
+            }
+        }
+        
+        // If headers don't contain topic, try to extract from payload
+        if (!result.payload.empty()) {
+            try {
+                Json::Value root;
+                Json::CharReaderBuilder builder;
+                std::string errors;
+                std::istringstream stream(result.payload);
+                
+                if (Json::parseFromStream(builder, stream, &root, &errors)) {
+                    // Look for topic in various places in the payload
+                    if (root.isMember("topic")) {
+                        return root["topic"].asString();
+                    }
+                    if (root.isMember("message") && root["message"].isMember("topic")) {
+                        return root["message"]["topic"].asString();
+                    }
+                }
+            } catch (const std::exception& e) {
+                DEBUG_LOG("Failed to parse payload for topic: ", e.what());
+            }
+        }
+        
+        // If we have subscribed topics, use the first one as fallback
+        // This is a reasonable assumption since the client typically subscribes to one topic at a time
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+        if (!subscribed_topics_.empty()) {
+            return *subscribed_topics_.begin();
+        }
+        
+        // Fallback to default
+        return "default";
+    }
+
+    std::string extract_message_identifier_from_headers(const std::string& headers_json) {
+        if (headers_json.empty()) return config_.client_id;
+        
+        try {
+            Json::Value root;
+            Json::CharReaderBuilder builder;
+            std::string errors;
+            std::istringstream stream(headers_json);
+            
+            if (Json::parseFromStream(builder, stream, &root, &errors)) {
+                if (root.isMember("messageIdentifier")) {
+                    return root["messageIdentifier"].asString();
+                }
+                if (root.isMember("clientId")) {
+                    return root["clientId"].asString();
+                }
+            }
+        } catch (const std::exception& e) {
+            DEBUG_LOG("Failed to parse headers for message identifier: ", e.what());
+        }
+        
+        return config_.client_id;
+    }
+
+    // Check if message should be filtered out from auto-commit
+    bool should_skip_auto_commit(const ParseResult& result) {
+        // Skip acknowledgments and control messages
+        if (result.message_type == "acknowledgment" || 
+            result.message_type == "acknowledgment_legacy" ||
+            result.message_type == "Acknowledgment" ||
+            result.message_type == "Acknowledgment_legacy" ||
+            result.message_type == "COMMIT_RESPONSE" ||
+            result.message_type == "SUBSCRIBE") {
+            return true;
+        }
+
+        // Skip acknowledgment messages by checking message ID pattern
+        if (!result.message_id.empty() && result.message_id.find("ack_") == 0) {
+            return true;
+        }
+
+        // Skip control topics (extract from message)
+        std::string topic = extract_topic_from_message(result);
+        if (topic == "_ack" || 
+            topic == "_control" ||
+            topic == "_subscriptions") {
+            return true;
+        }
+
+        // Skip messages without payload (likely control messages)
+        if (result.payload.empty()) {
+            return true;
+        }
+
+        return false;
+    }
+
+    // Send commit offset to server asynchronously
+    void send_commit_offset_async(const std::string& topic, 
+                                const std::string& message_identifier,
+                                const std::string& message_id,
+                                std::uint64_t timestamp_nanos,
+                                std::uint64_t sequence_number) {
+        if (config_.debug_logging) {
+            DEBUG_LOG("Starting async commit offset send for topic: ", topic, " messageID: ", message_id);
+        }
+        
+        std::thread([this, topic, message_identifier, message_id, timestamp_nanos, sequence_number]() {
+            try {
+                CommitOffset offset(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
+                if (!send_commit_offset(topic, offset)) {
+                    DEBUG_LOG("Failed to send commit offset to server for topic: ", topic);
+                } else {
+                    DEBUG_LOG("Sent commit offset to server for topic: ", topic, " messageID: ", message_id);
+                }
+            } catch (const std::exception& e) {
+                DEBUG_LOG("Error sending commit offset: ", e.what());
+            }
+        }).detach();
+    }
+
+    // Resume subscribed topics from last commit
+    void resume_subscribed_topics() {
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+        
+        for (const auto& topic : subscribed_topics_) {
+            if (config_.debug_logging) {
+                DEBUG_LOG("Resuming subscription for topic: ", topic);
+            }
+            
+            // Get the last commit for this topic
+            auto last_commit = commit_manager_->get_last_commit(topic, config_.client_id);
+            if (last_commit) {
+                // Resume from last commit
+                if (send_commit_offset(topic, *last_commit)) {
+                    DEBUG_LOG("Resumed from last commit for topic: ", topic, " messageID: ", last_commit->message_id);
+                } else {
+                    DEBUG_LOG("Failed to send commit offset for topic: ", topic);
+                }
+            } else {
+                // No previous commit, subscribe from latest
+                if (send_subscription_request(topic, config_.client_id, "LATEST") != "") {
+                    DEBUG_LOG("Subscribed to topic from latest: ", topic);
+                } else {
+                    DEBUG_LOG("Failed to subscribe to topic: ", topic);
+                }
+            }
+        }
+    }
+
+    // Add topic to subscribed topics tracking
+    void add_subscribed_topic(const std::string& topic) {
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+        subscribed_topics_.insert(topic);
+    }
+
+    // Remove topic from subscribed topics tracking
+    void remove_subscribed_topic(const std::string& topic) {
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+        subscribed_topics_.erase(topic);
     }
 
    private:
@@ -478,6 +708,14 @@ class ClusterClient::Impl {
     std::thread polling_thread_;
 
     std::unique_ptr<LocalFragmentReassembler> egress_reassembler_;
+
+    // Message deduplication
+    std::unordered_set<std::string> processed_messages_;
+    mutable std::mutex message_mutex_;
+
+    // Track subscribed topics for resume functionality
+    std::unordered_set<std::string> subscribed_topics_;
+    mutable std::mutex topics_mutex_;
 
     bool initialize_aeron() {
         try {
@@ -525,35 +763,89 @@ class ClusterClient::Impl {
             const std::uint8_t* data =
                 reinterpret_cast<const std::uint8_t*>(buffer.buffer()) + offset;
             ParseResult result = MessageParser::parse_message(data, length);
-            std::cout << "Received message: " << result.message_type << " " << result.message_id << " " << result.error_message
-                      << " - " << result.headers << " - " << result.payload
-                      << std::endl;
+            
+            if (config_.debug_logging) {
+                std::cout << "Received message: " << result.message_type << " " << result.message_id << " " << result.error_message
+                          << " - " << result.headers << " - " << result.payload
+                          << std::endl;
+            }
+            
             if (result.success) {
                 // Handle session events first
                 if (result.is_session_event()) {
                     session_manager_->handle_session_event(result);
                 }
 
-                // Call the message callback for all successful messages
-                if (message_callback_) {
-                    message_callback_(result);
+                // Check for message deduplication
+                if (!result.message_id.empty() && is_message_processed(result.message_id)) {
+                    // Message already processed, skip
+                    return;
                 }
 
-                // Auto-commit the message if it has a message ID
-                if (commit_manager_ && !result.message_id.empty()) {
-                    // Extract topic from headers or use default
-                    std::string topic = "default"; // Default topic
-                    std::string message_identifier = "default"; // Default identifier
+                // Basic debug output to see if we reach this point
+                if (config_.debug_logging) {
+                    std::cout << "[DEBUG] Processing message: " << result.message_id 
+                              << " type: " << result.message_type << std::endl;
+                }
+
+                // Check if message should be filtered out from auto-commit
+                bool should_skip = should_skip_auto_commit(result);
+                
+                if (config_.debug_logging) {
+                    DEBUG_LOG("Message processing: ID=", result.message_id, 
+                             " type=", result.message_type, 
+                             " should_skip=", should_skip,
+                             " has_commit_manager=", (commit_manager_ != nullptr));
+                }
+                
+                // Call the message callback for all successful messages
+                bool callback_success = false;
+                if (message_callback_) {
+                    try {
+                        message_callback_(result);
+                        callback_success = true;
+                    } catch (const std::exception& e) {
+                        DEBUG_LOG("Message callback failed: ", e.what());
+                        callback_success = false;
+                    }
+                } else {
+                    callback_success = true; // No callback means success
+                }
+
+                if (config_.debug_logging) {
+                    DEBUG_LOG("Callback success: ", callback_success, 
+                             " should_skip: ", should_skip,
+                             " has_message_id: ", !result.message_id.empty());
+                }
+
+                // Auto-commit only if callback succeeded and message should not be skipped
+                if (callback_success && !should_skip && commit_manager_ && !result.message_id.empty()) {
+                    // Mark message as processed
+                    mark_message_processed(result.message_id);
+                    
+                    // Extract proper topic and message identifier from message
+                    std::string topic = extract_topic_from_message(result);
+                    std::string message_identifier = extract_message_identifier_from_headers(result.headers);
                     std::uint64_t timestamp_nanos = result.timestamp;
                     std::uint64_t sequence_number = result.sequence_number;
                     
-                    // Try to extract topic and message identifier from headers if available
-                    if (!result.headers.empty()) {
-                        // Parse headers to extract topic and message identifier if available
-                        // For now, use default values
-                    }
+                    // Commit locally
+                    commit_manager_->commit_message(topic, message_identifier, result.message_id, 
+                                                   timestamp_nanos, sequence_number);
                     
-                    commit_manager_->commit_message(topic, message_identifier, result.message_id, timestamp_nanos, sequence_number);
+                    // Send commit offset to server asynchronously
+                    send_commit_offset_async(topic, message_identifier, result.message_id, 
+                                           timestamp_nanos, sequence_number);
+                    
+                    if (config_.debug_logging) {
+                        DEBUG_LOG("Message processed and committed successfully for topic: ", topic);
+                    }
+                } else if (!callback_success) {
+                    DEBUG_LOG("Message callback returned error, not committing: ", result.message_id);
+                } else if (should_skip) {
+                    if (config_.debug_logging) {
+                        DEBUG_LOG("Skipping auto-commit for control message: ", result.message_type);
+                    }
                 }
             } else {
                 DEBUG_LOG("Failed to parse message: ", result.error_message);

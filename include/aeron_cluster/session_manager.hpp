@@ -136,6 +136,13 @@ public:
     bool send_raw_message(const std::vector<std::uint8_t>& encoded_message);
 
     /**
+     * @brief Send combined message (with session envelope wrapper)
+     * @param business_message Pre-encoded business message
+     * @return true if message was successfully offered
+     */
+    bool send_combined_message(const std::vector<std::uint8_t>& business_message);
+
+    /**
      * @brief Send keepalive message
      * @return true if keepalive was sent successfully
      */
