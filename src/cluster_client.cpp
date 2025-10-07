@@ -221,8 +221,53 @@ class ClusterClient::Impl {
         return message_id;
     }
 
+    std::string publish_order_to_topic(const Order& order, const std::string& topic) {
+        if (!is_connected()) {
+            throw NotConnectedException();
+        }
+
+        if (topic.empty()) {
+            throw InvalidMessageException("Topic is empty");
+        }
+
+        auto validation_errors = order.validate();
+        if (!validation_errors.empty()) {
+            throw InvalidMessageException("Order validation failed: " + validation_errors[0]);
+        }
+
+        std::string message_id = OrderUtils::generate_message_id("msg");
+        std::string message_type = "CREATE_ORDER";
+        if (order.status == "UPDATED" || order.status == "CANCELLED") {
+            message_type = "UPDATE_ORDER";
+        }
+
+        std::string order_json = order.to_json();
+
+        Json::Value headers;
+        headers["messageId"] = message_id;
+        headers["messageType"] = message_type;
+        headers["orderId"] = order.id;
+
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        std::string headers_json = Json::writeString(builder, headers);
+
+        if (!session_manager_->publish_message(topic, message_type, message_id,
+                                               order_json, headers_json)) {
+            throw ClusterClientException("Failed to publish order message");
+        }
+
+        stats_.messages_sent++;
+        return message_id;
+    }
+
+
     std::future<std::string> publish_order_async(const Order& order) {
         return std::async(std::launch::async, [this, order]() { return publish_order(order); });
+    }
+
+    std::future<std::string> publish_order_to_topic_async(const Order& order, const std::string& topic) {
+        return std::async(std::launch::async, [this, order, topic]() { return publish_order_to_topic(order, topic); });
     }
 
     std::string publish_message(const std::string& message_type, const std::string& payload,
@@ -938,8 +983,16 @@ std::string ClusterClient::publish_order(const Order& order) {
     return pImpl_->publish_order(order);
 }
 
+std::string ClusterClient::publish_order_to_topic(const Order& order, const std::string& topic) {
+    return pImpl_->publish_order_to_topic(order, topic);
+}
+
 std::future<std::string> ClusterClient::publish_order_async(const Order& order) {
     return pImpl_->publish_order_async(order);
+}
+
+std::future<std::string> ClusterClient::publish_order_to_topic_async(const Order& order, const std::string& topic) {
+    return pImpl_->publish_order_to_topic_async(order, topic);
 }
 
 std::string ClusterClient::send_subscription_request(const std::string& topic,

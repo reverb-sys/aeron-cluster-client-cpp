@@ -245,7 +245,7 @@ int main(int argc, char* argv[]) {
                           .with_debug_logging(false)
                           .with_response_timeout(std::chrono::milliseconds(connectionTimeout))
                           .with_max_retries(3)
-                          .with_default_topic("order_request_topic")
+                          .with_default_topic("order_status_request_topic")
                           .build();
 
         // Enable debug mode if requested
@@ -359,7 +359,7 @@ int main(int argc, char* argv[]) {
                     order.customer_id = 50000 + i;
 
                     // Publish the order
-                    std::string messageId = client.publish_order(order);
+                    std::string messageId = client.publish_order_to_topic(order, "order_request_topic");
                     publishedMessageIds.push_back(messageId);
 
                     std::cout << "   Order " << (i + 1) << "/" << orderCount << ": " << side << " "
