@@ -13,6 +13,13 @@
 #include <unordered_set>
 #include <vector>
 
+// For generating unique instance identifiers
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <unistd.h>  // for getpid()
+#endif
+
 #include "aeron_cluster/ack_decoder.hpp"  // dual-path ACK decoding (simple + full SBE)
 #include "aeron_cluster/debug_utils.hpp"
 #include "aeron_cluster/protocol.hpp"  // constants: template ids, schema id, etc.
@@ -82,7 +89,12 @@ class ClusterClient::Impl {
           session_manager_(std::make_unique<SessionManager>(config)),
           commit_manager_(std::make_unique<CommitManager>()),
           connection_state_(ConnectionState::DISCONNECTED),
-          auto_reconnect_enabled_(false) {}
+          auto_reconnect_enabled_(false) {
+        // Generate unique instance identifier for load balancing if not provided
+        if (config_.instance_identifier.empty()) {
+            config_.instance_identifier = generate_instance_identifier();
+        }
+    }
 
     ~Impl() {
         try {
@@ -91,6 +103,23 @@ class ClusterClient::Impl {
         } catch (const std::exception& e) {
             DEBUG_LOG("Error in destructor: ", e.what());
         }
+    }
+    
+    // Generate a unique instance identifier for load balancing
+    static std::string generate_instance_identifier() {
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        
+        // Get process ID
+        #ifdef _WIN32
+            auto pid = GetCurrentProcessId();
+        #else
+            auto pid = getpid();
+        #endif
+        
+        std::ostringstream oss;
+        oss << "cpp_client_" << pid << "_" << timestamp;
+        return oss.str();
     }
 
     std::future<bool> connect_async() {
@@ -325,7 +354,12 @@ class ClusterClient::Impl {
 
     std::string send_subscription_request(const std::string& topic,
                                           const std::string& messageIdentifier,
-                                          const std::string& resumeStrategy) {
+                                          const std::string& resumeStrategy,
+                                          const std::string& instanceIdentifier = "") {
+        if (config_.debug_logging) {
+            DEBUG_LOG("send_subscription_request called: topic=", topic, " messageIdentifier=", messageIdentifier, 
+                     " resumeStrategy=", resumeStrategy, " instanceIdentifier=", instanceIdentifier);
+        }
         if (!is_connected()) {
             throw NotConnectedException();
         }
@@ -346,11 +380,16 @@ class ClusterClient::Impl {
         payload["action"] = "SUBSCRIBE";
         payload["messageIdentifier"] = messageIdentifier;
         payload["resumeStrategy"] = resumeStrategy;
+        
+        // Add instance identifier for load balancing - use auto-generated one or provided one
+        std::string effective_instance_id = instanceIdentifier.empty() ? config_.instance_identifier : instanceIdentifier;
+        payload["instanceIdentifier"] = effective_instance_id;
+        
         std::string payload_json = Json::writeString(builder, payload);
         if (config_.debug_logging) {
             std::cout << config_.logging.log_prefix
                       << " Sending subscription request for topic: " << topic
-                      << " (MessageID: " << message_id << ")" << std::endl;
+                      << " (MessageID: " << message_id << ", InstanceID: " << effective_instance_id << ")" << std::endl;
         }
 
         if (!session_manager_->publish_message("_subscriptions", message_type, message_id,
@@ -360,6 +399,16 @@ class ClusterClient::Impl {
 
         // Track subscribed topic
         add_subscribed_topic(topic);
+        
+        // Store the message identifier and instance identifier for this subscription
+        {
+            std::lock_guard<std::mutex> lock(subscription_mutex_);
+            subscription_message_identifiers_[topic] = messageIdentifier;
+            if (config_.debug_logging) {
+                DEBUG_LOG("Stored message identifier for topic ", topic, ": ", messageIdentifier);
+                DEBUG_LOG("Stored instance identifier for topic ", topic, ": ", effective_instance_id);
+            }
+        }
 
         stats_.messages_sent++;
         return message_id;
@@ -490,6 +539,12 @@ class ClusterClient::Impl {
 
         // Remove topic from tracking
         remove_subscribed_topic(topic);
+        
+        // Clean up stored message identifier for this subscription
+        {
+            std::lock_guard<std::mutex> lock(subscription_mutex_);
+            subscription_message_identifiers_.erase(topic);
+        }
 
         stats_.messages_sent++;
         return message_id;
@@ -535,7 +590,8 @@ class ClusterClient::Impl {
             return false;
         }
 
-        auto frame = commit_manager_->build_commit_offset_message(topic, config_.client_id, offset);
+        // Use the message identifier from the offset, not the default client_id
+        auto frame = commit_manager_->build_commit_offset_message(topic, offset.message_identifier, offset);
         
         // CRITICAL FIX: Use send_combined_message() instead of send_raw_message()
         // to include the session envelope wrapper that the cluster expects
@@ -562,6 +618,24 @@ class ClusterClient::Impl {
 
         // Send commit offset to resume from last known position
         return send_commit_offset(topic, *last_commit);
+    }
+    
+    // Load balancing and instance management implementation
+    void set_instance_identifier(const std::string& instance_id) {
+        config_.instance_identifier = instance_id;
+    }
+    
+    std::string get_instance_identifier() const {
+        return config_.instance_identifier;
+    }
+    
+    bool subscribe_topic_with_load_balancing(const std::string& topic, const std::string& message_identifier,
+                                          const std::string& resume_strategy) {
+        return send_subscription_request(topic, message_identifier, resume_strategy, config_.instance_identifier) != "";
+    }
+    
+    bool unsubscribe_topic_with_cleanup(const std::string& topic, const std::string& message_identifier) {
+        return send_unsubscription_request(topic, message_identifier) != "";
     }
 
     // Message deduplication helpers
@@ -638,8 +712,22 @@ class ClusterClient::Impl {
         return "default";
     }
 
-    std::string extract_message_identifier_from_headers(const std::string& headers_json) {
-        if (headers_json.empty()) return config_.client_id;
+    std::string extract_message_identifier_from_headers(const std::string& headers_json, const std::string& topic = "") {
+        // Check if headers_json is empty or just "{}" (empty JSON object)
+        if (headers_json.empty() || headers_json == "{}") {
+            // Use stored message identifier for this subscription if available
+            if (!topic.empty()) {
+                std::lock_guard<std::mutex> lock(subscription_mutex_);
+                auto it = subscription_message_identifiers_.find(topic);
+                if (it != subscription_message_identifiers_.end()) {
+                    std::cout << "[DEBUG] Using stored message identifier for topic " << topic << ": " << it->second << std::endl;
+                    return it->second;
+                } else {
+                    std::cout << "[DEBUG] No stored message identifier found for topic: " << topic << ", using default: " << config_.client_id << std::endl;
+                }
+            }
+            return config_.client_id;
+        }
         
         try {
             Json::Value root;
@@ -679,12 +767,21 @@ class ClusterClient::Impl {
             return true;
         }
 
-        // Skip control topics (extract from message)
+        // Skip control topics (extract from message) - but allow REPLAY_COMPLETE messages
         std::string topic = extract_topic_from_message(result);
         if (topic == "_ack" || 
-            topic == "_control" ||
             topic == "_subscriptions") {
             return true;
+        }
+        
+        // Allow _control messages that are REPLAY_COMPLETE
+        if (topic == "_control") {
+            // Check if this is a REPLAY_COMPLETE message
+            if (result.message_type == "REPLAY_COMPLETE" || 
+                result.payload.find("REPLAY_COMPLETE") != std::string::npos) {
+                return false; // Don't skip REPLAY_COMPLETE messages
+            }
+            return true; // Skip other control messages
         }
 
         // Skip messages without payload (likely control messages)
@@ -728,8 +825,18 @@ class ClusterClient::Impl {
                 DEBUG_LOG("Resuming subscription for topic: ", topic);
             }
             
-            // Get the last commit for this topic
-            auto last_commit = commit_manager_->get_last_commit(topic, config_.client_id);
+            // Get the stored message identifier for this topic
+            std::string message_identifier = config_.client_id; // fallback to default
+            {
+                std::lock_guard<std::mutex> sub_lock(subscription_mutex_);
+                auto it = subscription_message_identifiers_.find(topic);
+                if (it != subscription_message_identifiers_.end()) {
+                    message_identifier = it->second;
+                }
+            }
+            
+            // Get the last commit for this topic with the correct message identifier
+            auto last_commit = commit_manager_->get_last_commit(topic, message_identifier);
             if (last_commit) {
                 // Resume from last commit
                 if (send_commit_offset(topic, *last_commit)) {
@@ -739,7 +846,7 @@ class ClusterClient::Impl {
                 }
             } else {
                 // No previous commit, subscribe from latest
-                if (send_subscription_request(topic, config_.client_id, "LATEST") != "") {
+                if (send_subscription_request(topic, message_identifier, "LATEST") != "") {
                     DEBUG_LOG("Subscribed to topic from latest: ", topic);
                 } else {
                     DEBUG_LOG("Failed to subscribe to topic: ", topic);
@@ -781,6 +888,10 @@ class ClusterClient::Impl {
     std::thread polling_thread_;
 
     std::unique_ptr<LocalFragmentReassembler> egress_reassembler_;
+    
+    // Subscription tracking: topic -> message identifier mapping
+    std::unordered_map<std::string, std::string> subscription_message_identifiers_;
+    std::mutex subscription_mutex_;
 
     // Message deduplication
     std::unordered_set<std::string> processed_messages_;
@@ -856,10 +967,9 @@ class ClusterClient::Impl {
                 }
 
                 // Basic debug output to see if we reach this point
-                if (config_.debug_logging) {
-                    std::cout << "[DEBUG] Processing message: " << result.message_id 
-                              << " type: " << result.message_type << std::endl;
-                }
+                std::cout << "[DEBUG] Processing message: " << result.message_id 
+                          << " type: " << result.message_type 
+                          << " payload length: " << result.payload.length() << std::endl;
 
                 // Check if message should be filtered out from auto-commit
                 bool should_skip = should_skip_auto_commit(result);
@@ -892,13 +1002,35 @@ class ClusterClient::Impl {
                 }
 
                 // Auto-commit only if callback succeeded and message should not be skipped
+                if (config_.debug_logging) {
+                    DEBUG_LOG("Commit check: callback_success=", callback_success, " should_skip=", should_skip, " has_commit_manager=", (commit_manager_ != nullptr), " has_message_id=", !result.message_id.empty());
+                }
                 if (callback_success && !should_skip && commit_manager_ && !result.message_id.empty()) {
                     // Mark message as processed
                     mark_message_processed(result.message_id);
                     
                     // Extract proper topic and message identifier from message
                     std::string topic = extract_topic_from_message(result);
-                    std::string message_identifier = extract_message_identifier_from_headers(result.headers);
+                    if (config_.debug_logging) {
+                        DEBUG_LOG("Extracting message identifier for topic: ", topic, " headers: ", result.headers);
+                    }
+                    
+                    // Use the stored message identifier for this subscription, not from headers
+                    std::string message_identifier = config_.client_id; // fallback to default
+                    {
+                        std::lock_guard<std::mutex> lock(subscription_mutex_);
+                        auto it = subscription_message_identifiers_.find(topic);
+                        if (it != subscription_message_identifiers_.end()) {
+                            message_identifier = it->second;
+                            if (config_.debug_logging) {
+                                DEBUG_LOG("Using stored message identifier for topic ", topic, ": ", message_identifier);
+                            }
+                        } else {
+                            if (config_.debug_logging) {
+                                DEBUG_LOG("No stored message identifier found for topic: ", topic, ", using default: ", config_.client_id);
+                            }
+                        }
+                    }
                     std::uint64_t timestamp_nanos = result.timestamp;
                     std::uint64_t sequence_number = result.sequence_number;
                     
@@ -1025,8 +1157,9 @@ std::future<std::string> ClusterClient::publish_order_to_topic_async(const Order
 
 std::string ClusterClient::send_subscription_request(const std::string& topic,
                                                      const std::string& messageIdentifier,
-                                                     const std::string& resumeStrategy) {
-    return pImpl_->send_subscription_request(topic, messageIdentifier, resumeStrategy);
+                                                     const std::string& resumeStrategy,
+                                                     const std::string& instanceIdentifier) {
+    return pImpl_->send_subscription_request(topic, messageIdentifier, resumeStrategy, instanceIdentifier);
 }
 
 std::string ClusterClient::publish_message(const std::string& message_type,
@@ -1185,6 +1318,23 @@ bool ClusterClient::send_commit_offset(const std::string& topic, const CommitOff
 
 bool ClusterClient::resume_from_last_commit(const std::string& topic, const std::string& message_identifier) {
     return pImpl_->resume_from_last_commit(topic, message_identifier);
+}
+
+void ClusterClient::set_instance_identifier(const std::string& instance_id) {
+    pImpl_->set_instance_identifier(instance_id);
+}
+
+std::string ClusterClient::get_instance_identifier() const {
+    return pImpl_->get_instance_identifier();
+}
+
+bool ClusterClient::subscribe_topic_with_load_balancing(const std::string& topic, const std::string& message_identifier,
+                                                      const std::string& resume_strategy) {
+    return pImpl_->subscribe_topic_with_load_balancing(topic, message_identifier, resume_strategy);
+}
+
+bool ClusterClient::unsubscribe_topic_with_cleanup(const std::string& topic, const std::string& message_identifier) {
+    return pImpl_->unsubscribe_topic_with_cleanup(topic, message_identifier);
 }
 
 void ClusterClient::remember_outgoing(const std::string& uuid, std::uint64_t ts_nanos) {

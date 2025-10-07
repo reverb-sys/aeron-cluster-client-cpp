@@ -133,7 +133,7 @@ std::string Order::to_json() const {
     headers["customer_id"] = std::to_string(customer_id);
     headers["ip_address"] = "10.37.62.251";
     headers["create_ts"] = std::to_string(timestamp / 1000000); // Convert to milliseconds
-    headers["auth_token"] = "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhayI6IjZTYXZHSFJkMzJCVWdXZ05NdEdBQnBZV05aaFFkMUxQZ1dsbE1oOHh4RXdqUjNOMTFvaWNMcXY2STltVkZvcUYiLCJhdWQiOiJTRUtBUl9BRVJPTjAxX1RYIiwiZXhwIjoxNzU4NzgxMzI5LCJpYXQiOjE3NTg2MDg1MjksInNjb3BlIjoid3JpdGU6dHJhZGUgY3J1ZDpzZXNzaW9uIn0.X9h-jz1NeoKJLCFtDPmcEuqOhrCdZIzWCyxOprQ1OD07TBPRIwz0hGRM2jwIrIzBkeLJ0lFuaJPA-McjGMAkdzSozcf1d61HFK56ORfCerR_9Omgaw2EsRZv7qCkwZmBdYBbf0_7vr_YdNiL5J7a77efZdso4Ac2k9RqmsbnDMNaPtt1nC5eMwJhdwbwzKS9NdqDXGhmuXBpVj3YcweWY2uiYYC0cpILiEcFD-j0OGsDqM8QWC29cwyFYryjU16YGLesD7qluWzSBmbeqCHAg2F9oMKZO886hdHqtN3rqd6Oo8oDsd1F7yN00AJzICbqKbFq8m6RzAgBxh9kNQgdwbzgkQIY-eDLPZsRf6kNLJvA-dMjuHHLu7VssrY-kRd_WX_CWnnhwP0yfQDB-1nHHqvCjIUY_lWElnyWHtKW_7xQSDIoc8CJQ4P9xY0KPEEC-qv0kHGfvbXVEN1cqXIWdY-vRLTQxb4Rw2YDK0yZvMJggT-C68g6pFdTQzd5pSUVg45hDO8KIu0O90wvATvljWrfGfCryzkwWSWRKYRvUGXcBCgVipiEt-CT7OzfeX4mZQwU56lH4_OT4DK-Sw-lw46pjxUHgKXyENnvm8cd8xf0o2CgrKX6ChJTkHExpNuOp-lHRul7V_20MtkRVIz6Le0YtOHZK-wsFcc4UhO_r3c";
+    headers["auth_token"] = "Bearer xxx";
     
     // Message content
     Json::Value message_content;

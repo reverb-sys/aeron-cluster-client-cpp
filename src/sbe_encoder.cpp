@@ -957,6 +957,12 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
 
         // ✅ Only skip the SBE header (8 bytes), not block_length
         std::size_t messageBodyLength = length - sbe::MessageHeader::encodedLength();
+        
+        DEBUG_LOG("[DEBUG] Buffer length calculation:");
+        DEBUG_LOG("  total_length=", length);
+        DEBUG_LOG("  header_length=", sbe::MessageHeader::encodedLength());
+        DEBUG_LOG("  messageBodyLength=", messageBodyLength);
+        DEBUG_LOG("  acting_block_length=", acting_block_length);
 
         sbe::TopicMessage topicMessage;
 
@@ -965,7 +971,7 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
                                    sbe::MessageHeader::encodedLength(),  // start right after header
                                    acting_block_length, 
                                    acting_version,
-                                   static_cast<int>(messageBodyLength));
+                                   static_cast<int>(length));  // Use full buffer length
         
 
         // Decode fields

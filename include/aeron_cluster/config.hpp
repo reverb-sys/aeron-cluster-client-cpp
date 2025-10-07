@@ -32,6 +32,7 @@ struct ClusterClientConfig {
         "localhost:9002", "localhost:9102", "localhost:9202"
     };
     std::string client_id = "cpp_client";
+    std::string instance_identifier = ""; // Auto-generated unique identifier for load balancing
     std::string response_channel = "aeron:udp?endpoint=localhost:0";
     std::string aeron_dir = "/dev/shm/aeron";
     
