@@ -179,10 +179,14 @@ public:
     /**
      * @brief Send a subscription request to a specific topic
      * @param topic Topic name to subscribe to
+     * @param messageIdentifier Message identifier for tracking
+     * @param resumeStrategy Resume strategy (LATEST, FROM_LAST, etc.)
+     * @param instanceIdentifier Instance identifier for load balancing
      * @return Message ID for tracking acknowledgments
      * @throws NotConnectedException if not connected
      */
-    std::string send_subscription_request(const std::string& topic, const std::string& messageIdentifier, const std::string& resumeStrategy);
+    std::string send_subscription_request(const std::string& topic, const std::string& messageIdentifier, 
+                                        const std::string& resumeStrategy, const std::string& instanceIdentifier = "");
 
     
     /**
@@ -376,6 +380,17 @@ public:
 
     // Resume subscription from last commit for a topic and message identifier
     bool resume_from_last_commit(const std::string& topic, const std::string& message_identifier);
+
+    // Load balancing and instance management
+    void set_instance_identifier(const std::string& instance_id);
+    std::string get_instance_identifier() const;
+    
+    // Subscribe to topic with load balancing support
+    bool subscribe_topic_with_load_balancing(const std::string& topic, const std::string& message_identifier,
+                                          const std::string& resume_strategy = "LATEST");
+    
+    // Unsubscribe from topic with instance cleanup
+    bool unsubscribe_topic_with_cleanup(const std::string& topic, const std::string& message_identifier);
 
     // Callbacks
     void on_topic_message(TopicMessageCallback cb) { handler_.set_topic_message_callback(std::move(cb)); }
