@@ -1,4 +1,5 @@
 #include <aeron_cluster/cluster_client.hpp>
+#include <aeron_cluster/logging.hpp>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -8,6 +9,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <ctime>
+#include <sys/types.h>
 
 #include <fstream>
 #include <iomanip>
@@ -23,8 +26,11 @@ using namespace aeron_cluster;
 // Global flag for graceful shutdown
 std::atomic<bool> running{true};
 
+// Global logger instance
+std::shared_ptr<Logger> logger;
+
 void signalHandler(int signal) {
-    std::cout << "\nReceived signal " << signal << ", shutting down gracefully..." << std::endl;
+    logger->info("Received signal {}, shutting down gracefully...", signal);
     running = false;
 }
 
@@ -32,10 +38,10 @@ void printUsage() {
     std::cout << "Aeron Cluster C++ Client - Basic Example" << std::endl;
     std::cout << "=========================================" << std::endl;
     std::cout << "\nThis example demonstrates:" << std::endl;
-    std::cout << "• Connecting to Aeron Cluster" << std::endl;
-    std::cout << "• Publishing sample trading orders" << std::endl;
-    std::cout << "• Receiving and handling acknowledgments" << std::endl;
-    std::cout << "• Connection statistics and monitoring" << std::endl;
+    std::cout << "- Connecting to Aeron Cluster" << std::endl;
+    std::cout << "- Publishing sample trading orders" << std::endl;
+    std::cout << "- Receiving and handling acknowledgments" << std::endl;
+    std::cout << "- Connection statistics and monitoring" << std::endl;
     std::cout << "\nUsage: ./basic_client_example [options]" << std::endl;
     std::cout << "\nOptions:" << std::endl;
     std::cout << "  --help              Show this help message" << std::endl;
@@ -80,7 +86,7 @@ std::vector<std::string> parseEndpoints(const std::string& endpointList) {
 // FIXED: Add pre-flight checks
 bool performPreflightChecks(const std::string& aeronDir,
                             const std::vector<std::string>& endpoints) {
-    std::cout << "🔍 Performing pre-flight checks..." << std::endl;
+    logger->info("Performing pre-flight checks...");
 
     // Check 1: Aeron directory and Media Driver
     std::string cncFile = aeronDir + "/cnc.dat";
@@ -89,16 +95,16 @@ bool performPreflightChecks(const std::string& aeronDir,
     file.close();
 
     if (!aeronRunning) {
-        std::cout << "❌ Aeron Media Driver not detected" << std::endl;
+        logger->error("Aeron Media Driver not detected");
         return false;
     }
-    std::cout << "✅ Aeron Media Driver detected at: " << aeronDir << std::endl;
+    logger->info("Aeron Media Driver detected at: {}", aeronDir);
 
     // Check 2: Warn about cluster requirements
-    std::cout << "⚠️  Cluster Requirements:" << std::endl;
-    std::cout << "   Make sure Aeron Cluster is running at these endpoints:" << std::endl;
+    logger->warn("Cluster Requirements:");
+    logger->warn("Make sure Aeron Cluster is running at these endpoints:");
     for (const auto& endpoint : endpoints) {
-        std::cout << "   • " << endpoint << std::endl;
+        logger->warn("  - {}", endpoint);
     }
 
     return true;
@@ -107,7 +113,7 @@ bool performPreflightChecks(const std::string& aeronDir,
 // FIXED: Add connection test with timeout
 bool testClusterConnectivity(const std::vector<std::string>& endpoints, const std::string& aeronDir,
                              int timeoutMs, bool debugMode) {
-    std::cout << "🔌 Testing cluster connectivity..." << std::endl;
+    logger->info("Testing cluster connectivity...");
 
     try {
         // Create minimal configuration for connectivity test
@@ -126,30 +132,33 @@ bool testClusterConnectivity(const std::vector<std::string>& endpoints, const st
         // Create client and attempt connection
         ClusterClient testClient(config);
 
-        std::cout << "⏱️  Attempting connection (timeout: " << timeoutMs << "ms)..." << std::endl;
+        logger->info("Attempting connection (timeout: {}ms)...", timeoutMs);
 
         bool connected = testClient.connect();
 
         if (connected) {
-            std::cout << "✅ Successfully connected to cluster!" << std::endl;
-            std::cout << "   Session ID: " << testClient.get_session_id() << std::endl;
-            std::cout << "   Leader Member: " << testClient.get_leader_member_id() << std::endl;
+            logger->info("Successfully connected to cluster!");
+            logger->info("Session ID: {}", testClient.get_session_id());
+            logger->info("Leader Member: {}", testClient.get_leader_member_id());
 
             // Disconnect cleanly
             testClient.disconnect();
             return true;
         } else {
-            std::cout << "❌ Failed to connect to cluster" << std::endl;
+            logger->error("Failed to connect to cluster");
             return false;
         }
 
     } catch (const std::exception& e) {
-        std::cout << "❌ Connection test failed with exception: " << e.what() << std::endl;
+        logger->error("Connection test failed with exception: {}", e.what());
         return false;
     }
 }
 
 int main(int argc, char* argv[]) {
+    // Initialize logger
+    logger = LoggerFactory::instance().getLogger("basic_client_example");
+    
     // Parse command line arguments
     std::vector<std::string> clusterEndpoints = {"localhost:9002", "localhost:9102",
                                                  "localhost:9202"};
@@ -177,8 +186,7 @@ int main(int argc, char* argv[]) {
                 orderCount = 0;     // No orders for subscriber
                 orderInterval = 0;  // No interval for subscriber
             } else if (clientType != "publisher") {
-                std::cerr << "Invalid client type: " << clientType
-                          << ". Use 'publisher' or 'subscriber'." << std::endl;
+                logger->error("Invalid client type: {}. Use 'publisher' or 'subscriber'.", clientType);
                 printUsage();
                 return 1;
             }
@@ -193,7 +201,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--timeout" && i + 1 < argc) {
             connectionTimeout = std::stoi(argv[++i]);
         } else {
-            std::cerr << "Unknown option: " << arg << std::endl;
+            logger->error("Unknown option: {}", arg);
             printUsage();
             return 1;
         }
@@ -202,35 +210,34 @@ int main(int argc, char* argv[]) {
     // Setup signal handlers for graceful shutdown
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    std::signal(SIGHUP, signalHandler);  // Also handle SIGHUP for robustness
 
-    std::cout << "🚀 Starting Aeron Cluster C++ Client Example" << std::endl;
-    std::cout << "=============================================" << std::endl;
-    std::cout << "📋 Configuration:" << std::endl;
-    std::cout << "   Cluster endpoints: ";
+    logger->info("Starting Aeron Cluster C++ Client Example");
+    logger->info("=============================================");
+    logger->info("Configuration:");
+    
+    std::string endpointsStr;
     for (size_t i = 0; i < clusterEndpoints.size(); ++i) {
-        std::cout << clusterEndpoints[i];
+        endpointsStr += clusterEndpoints[i];
         if (i < clusterEndpoints.size() - 1)
-            std::cout << ", ";
+            endpointsStr += ", ";
     }
-    std::cout << std::endl;
-    std::cout << "   Aeron directory: " << aeronDir << std::endl;
-    std::cout << "   Debug mode: " << (debugMode ? "enabled" : "disabled") << std::endl;
-    std::cout << "   Connection timeout: " << connectionTimeout << "ms" << std::endl;
+    logger->info("Cluster endpoints: {}", endpointsStr);
+    logger->info("Aeron directory: {}", aeronDir);
+    logger->info("Debug mode: {}", debugMode ? "enabled" : "disabled");
+    logger->info("Connection timeout: {}ms", connectionTimeout);
 
     if (clientType == "subscriber") {
-        std::cout << "   Client type: Subscriber (no orders will be sent)" << std::endl;
+        logger->info("Client type: Subscriber (no orders will be sent)");
     } else {
-        std::cout << "   Client type: Publisher" << std::endl;
+        logger->info("Client type: Publisher");
         if (!checkOnly) {
-            std::cout << "   Orders to send: " << orderCount << std::endl;
-            std::cout << "   Order interval: " << orderInterval << "ms" << std::endl;
+            logger->info("Orders to send: {}", orderCount);
+            logger->info("Order interval: {}ms", orderInterval);
         } else {
-            std::cout << "   Only checking cluster availability, no orders will be sent"
-                      << std::endl;
+            logger->info("Only checking cluster availability, no orders will be sent");
         }
     }
-
-    std::cout << std::endl;
 
     try {
         // FIXED: Perform pre-flight checks first
@@ -242,10 +249,10 @@ int main(int argc, char* argv[]) {
         auto config = ClusterClientConfigBuilder()
                           .with_cluster_endpoints(clusterEndpoints)
                           .with_aeron_dir(aeronDir)
-                          .with_debug_logging(false)
+                          .with_debug_logging(true)  // Enable debug logging to see what's happening
                           .with_response_timeout(std::chrono::milliseconds(connectionTimeout))
                           .with_max_retries(3)
-                          .with_default_topic("order_status_request_topic")
+                          .with_default_topic("order_request_topic")
                           .build();
 
         // Enable debug mode if requested
@@ -264,84 +271,219 @@ int main(int argc, char* argv[]) {
         client.set_message_callback([&](const aeron_cluster::ParseResult& result) {
             if (result.is_order_message()) {
                 // Handle ORDER_MESSAGE specifically
-                std::cout << "🎯 ORDER_MESSAGE received: " << result.payload.substr(0, 200) << std::endl;
-                std::cout << "   Message Type: " << result.message_type << std::endl;
-                std::cout << "   Message ID: " << result.message_id << std::endl;
+                logger->info("ORDER_MESSAGE received: {}", result.payload.substr(0, 200));
+                logger->debug("Message Type: {}", result.message_type);
+                logger->debug("Message ID: {}", result.message_id);
             } else if (result.is_acknowledgment()) {
                 // Handle acknowledgments
-                std::cout << "✅ Acknowledgment received" << std::endl;
+                logger->info("Acknowledgment received");
                 // Parse the acknowledgment
                 if (result.payload.find("\"success\":true") != std::string::npos ||
                     result.payload.find("\"status\":\"success\"") != std::string::npos ||
                     result.payload.find("SUCCESS") != std::string::npos) {
                     acknowledgedOrders++;
-                    std::cout << "✅ Order acknowledged (" << acknowledgedOrders << "/"
-                              << orderCount << ")" << std::endl;
+                    logger->info("Order acknowledged ({}/{})", acknowledgedOrders, orderCount);
                 } else {
                     failedOrders++;
-                    std::cout << "❌ Order failed (" << failedOrders << " total failures)"
-                              << std::endl;
+                    logger->warn("Order failed ({} total failures)", failedOrders);
                     if (debugMode) {
-                        std::cout << "   Failure details: " << result.payload.substr(0, 200)
-                                  << std::endl;
+                        logger->debug("Failure details: {}", result.payload.substr(0, 200));
                     }
                 }
             } else if (result.is_topic_message()) {
                 // Handle other TopicMessages
-                std::cout << "📨 TopicMessage received: " << result.message_type << std::endl;
+                logger->info("TopicMessage received: {}", result.message_type);
                 
+                // Check for REPLAY_COMPLETE messages
+                if (result.message_type == "REPLAY_COMPLETE" || 
+                    result.payload.find("REPLAY_COMPLETE") != std::string::npos) {
+                    logger->info("REPLAY_COMPLETE received: {}", result.payload);
+                }
                 // Check if this is actually an ORDER_MESSAGE by content
-                if (result.message_type == "CREATE_ORDER" || 
+                else if (result.message_type == "CREATE_ORDER" || 
                     result.payload.find("order_details") != std::string::npos ||
                     result.payload.find("token_pair") != std::string::npos) {
-                    std::cout << "🎯 ORDER_MESSAGE detected by content: " << result.payload.substr(0, 200) << std::endl;
-                    std::cout << "   Message Type: " << result.message_type << std::endl;
-                    std::cout << "   Message ID: " << result.message_id << std::endl;
-                } else if (debugMode) {
-                    std::cout << "   Payload: " << result.payload.substr(0, 200) << std::endl;
+                    logger->info("ORDER_MESSAGE detected by content: {}", result.payload.substr(0, 200));
+                    logger->debug("Message Type: {}", result.message_type);
+                    logger->debug("Message ID: {}", result.message_id);
+                } else {
+                    // For subscriber mode, show all messages
+                    logger->info("Message details:");
+                    logger->debug("Message Type: {}", result.message_type);
+                    logger->debug("Message ID: {}", result.message_id);
+                    logger->debug("Payload: {}", result.payload.substr(0, 200));
+                    if (!result.headers.empty()) {
+                        logger->debug("Headers: {}", result.headers);
+                    }
                 }
             } else if (debugMode) {
                 // print all result
-                std::cout << "📨 Received message type: " << result.message_type << std::endl;
-                std::cout << "📨 Received message payload: " << result.payload.substr(0, 200)
-                          << std::endl;
-                std::cout << " Received message ID: " << result.message_id.substr(0, 12) << "..."
-                          << std::endl;
-                std::cout << "   Received message Timestamp: " << result.timestamp << std::endl;
-                std::cout << "   Correlation ID: " << result.correlation_id << std::endl;
-                // std::cout << "   Received message header: " << result.header << std::endl;
-                std::cout << "   Received message length: " << result.payload.length() << " bytes"
-                          << std::endl;
+                logger->debug("Received message type: {}", result.message_type);
+                logger->debug("Received message payload: {}", result.payload.substr(0, 200));
+                logger->debug("Received message ID: {}...", result.message_id.substr(0, 12));
+                logger->debug("Received message Timestamp: {}", result.timestamp);
+                logger->debug("Correlation ID: {}", result.correlation_id);
+                logger->debug("Received message length: {} bytes", result.payload.length());
             }
         });
 
         // Connect to the cluster (we know it works from connectivity test)
-        std::cout << "🔌 Connecting to Aeron Cluster for order processing..." << std::endl;
+        logger->info("Connecting to Aeron Cluster for order processing...");
 
         if (!client.connect()) {
-            std::cerr << "❌ Failed to connect to cluster for order processing" << std::endl;
+            logger->error("Failed to connect to cluster for order processing");
             return 1;
         }
 
-        std::cout << "🎉 Successfully connected to cluster!" << std::endl;
-        std::cout << "   Session ID: " << client.get_session_id() << std::endl;
-        std::cout << "   Leader Member: " << client.get_leader_member_id() << std::endl;
-        std::cout << std::endl;
+        logger->info("Successfully connected to cluster!");
+        logger->info("Session ID: {}", client.get_session_id());
+        logger->info("Leader Member: {}", client.get_leader_member_id());
 
         if (clientType == "subscriber") {
-            std::cout << "📡 Subscribing to order requests..." << std::endl;
-            // Subscribe to orders topic: Send subscription request to _subscriptions topic
-            client.send_subscription_request("order_request_topic", "sender_comp_id", "LATEST");
-
-            std::cout << "   Waiting for orders (no orders sent)" << std::endl;
+            logger->info("Subscribing to order requests...");
+            
+            // Set up connection state callback to monitor connection changes
+            client.set_connection_state_callback([&](aeron_cluster::ConnectionState old_state, aeron_cluster::ConnectionState new_state) {
+                logger->info("Connection state changed: {} -> {}", static_cast<int>(old_state), static_cast<int>(new_state));
+                if (new_state == aeron_cluster::ConnectionState::DISCONNECTED) {
+                    logger->warn("Connection lost!");
+                } else if (new_state == aeron_cluster::ConnectionState::CONNECTED) {
+                    logger->info("Connection established!");
+                }
+            });
+            
+            logger->info("Waiting for orders (no orders will be sent)");
+            
+            // Start polling BEFORE sending subscription request to catch replay messages
+            logger->info("Starting message polling...");
+            int pollCount = 0;
+            auto lastActivityTime = std::chrono::steady_clock::now();
+            const auto connectionTimeout = std::chrono::seconds(30); // 30 second timeout
+            bool subscriptionSent = false;
+            bool isReconnecting = false;
+            int reconnectAttempts = 0;
+            const int maxReconnectAttempts = -1; // Infinite reconnection attempts
+            const auto reconnectDelay = std::chrono::seconds(5); // Start with 5 second delay
+            auto currentReconnectDelay = reconnectDelay;
+            auto lastConnectionTime = std::chrono::steady_clock::now();
+            const auto minConnectionDuration = std::chrono::seconds(10); // Minimum time to consider connection stable
+            
             while (running) {
-                client.poll_messages(10);
+                // Check connection status first
+                if (!client.is_connected()) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto connectionDuration = now - lastConnectionTime;
+                    
+                    // Only start reconnection if we've been disconnected for a reasonable time
+                    // or if we haven't been connected long enough to be stable
+                    if (!isReconnecting && (connectionDuration > minConnectionDuration || reconnectAttempts == 0)) {
+                        logger->warn("Connection lost! Starting reconnection process...");
+                        isReconnecting = true;
+                        subscriptionSent = false; // Reset subscription flag
+                        reconnectAttempts = 0;
+                        currentReconnectDelay = reconnectDelay; // Reset delay
+                    }
+                    
+                    // Only attempt reconnection if we're in reconnection mode
+                    if (!isReconnecting) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        continue;
+                    }
+                    
+                    // Attempt reconnection
+                    logger->info("Reconnection attempt {}...", reconnectAttempts + 1);
+                    if (client.connect()) {
+                        logger->info("Reconnected successfully!");
+                        isReconnecting = false;
+                        reconnectAttempts = 0;
+                        currentReconnectDelay = reconnectDelay; // Reset delay for next time
+                        lastActivityTime = std::chrono::steady_clock::now(); // Reset timeout
+                        lastConnectionTime = std::chrono::steady_clock::now(); // Track connection time
+                    } else {
+                        reconnectAttempts++;
+                        if (maxReconnectAttempts > 0 && reconnectAttempts >= maxReconnectAttempts) {
+                            logger->error("Maximum reconnection attempts reached. Exiting...");
+                            break;
+                        }
+                        
+                        // Exponential backoff with jitter
+                        auto backoffDelay = currentReconnectDelay + std::chrono::milliseconds(
+                            std::rand() % 1000); // Add up to 1 second jitter
+                        
+                        logger->warn("Reconnection failed. Retrying in {} seconds... (attempt {})", 
+                                  std::chrono::duration_cast<std::chrono::seconds>(backoffDelay).count(), 
+                                  reconnectAttempts);
+                        
+                        std::this_thread::sleep_for(backoffDelay);
+                        
+                        // Increase delay for next attempt (capped at 30 seconds)
+                        currentReconnectDelay = std::min(currentReconnectDelay * 2, std::chrono::seconds(30));
+                        continue;
+                    }
+                }
+                
+                // Send subscription request on first connection or after reconnection
+                if (!subscriptionSent && client.is_connected()) {
+                    logger->info("Sending subscription request...");
+                    try {
+                        // Generate unique instance identifier for load balancing
+                        std::string instance_id = "cpp_client_" + std::to_string(getpid()) + "_" + std::to_string(std::time(nullptr));
+                        client.send_subscription_request("order_request_topic", "ROHIT_AERON01_TX", "LAST_COMMIT", instance_id);
+                        logger->info("Subscription request sent!");
+                        subscriptionSent = true;
+                    } catch (const std::exception& e) {
+                        logger->error("Failed to send subscription request: {}", e.what());
+                        subscriptionSent = false;
+                        continue;
+                    }
+                }
+                
+                // Only poll messages if we're connected and subscribed
+                if (client.is_connected() && subscriptionSent) {
+                    int messagesReceived = client.poll_messages(10);
+                    if (messagesReceived > 0) {
+                        logger->debug("Polled {} messages", messagesReceived);
+                        lastActivityTime = std::chrono::steady_clock::now(); // Reset timeout on activity
+                    }
+                } else if (client.is_connected() && !subscriptionSent) {
+                    // We're connected but not subscribed yet, just wait a bit
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                
+                pollCount++;
+                if (pollCount % 50 == 0) {  // Show status every 5 seconds
+                    if (isReconnecting) {
+                        logger->info("Reconnecting... (attempt {})", reconnectAttempts);
+                    } else if (client.is_connected() && subscriptionSent) {
+                        logger->debug("Still waiting for messages... (polled {} times)", pollCount);
+                    } else if (client.is_connected() && !subscriptionSent) {
+                        logger->debug("Connected, waiting to subscribe...");
+                    }
+                }
+                
+                // Check for timeout - if no activity for 30 seconds, something might be wrong
+                // But only if we're not already reconnecting and have been connected for a while
+                auto now = std::chrono::steady_clock::now();
+                auto connectionDuration = now - lastConnectionTime;
+                if (!isReconnecting && connectionDuration > minConnectionDuration && 
+                    now - lastActivityTime > connectionTimeout) {
+                    logger->warn("No activity for 30 seconds, checking connection...");
+                    if (!client.is_connected()) {
+                        logger->warn("Connection lost during timeout check!");
+                        isReconnecting = true; // Trigger reconnection logic
+                        subscriptionSent = false; // Reset subscription flag
+                        continue; // Will trigger reconnection logic above
+                    }
+                    lastActivityTime = now; // Reset timeout
+                }
+                
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             return 0;  // Exit after subscriber logic
         } else {
             // Publish test orders
-            std::cout << "📤 Publishing " << orderCount << " test orders..." << std::endl;
+            logger->info("Publishing {} test orders...", orderCount);
             std::vector<std::string> publishedMessageIds;
 
             for (int i = 0; i < orderCount && running; ++i) {
@@ -362,9 +504,8 @@ int main(int argc, char* argv[]) {
                     std::string messageId = client.publish_order_to_topic(order, "order_request_topic");
                     publishedMessageIds.push_back(messageId);
 
-                    std::cout << "   Order " << (i + 1) << "/" << orderCount << ": " << side << " "
-                              << quantity << " ETH @ " << price
-                              << " USDC (ID: " << messageId.substr(0, 12) << "...)" << std::endl;
+                    logger->info("Order {}/{}: {} {} ETH @ {} USDC (ID: {}...)", 
+                              i + 1, orderCount, side, quantity, price, messageId.substr(0, 12));
 
                     // Wait between orders
                     if (i < orderCount - 1 && running) {
@@ -375,14 +516,12 @@ int main(int argc, char* argv[]) {
                     client.poll_messages(5);
 
                 } catch (const std::exception& e) {
-                    std::cerr << "❌ Failed to publish order " << (i + 1) << ": " << e.what()
-                              << std::endl;
+                    logger->error("Failed to publish order {}: {}", i + 1, e.what());
                     failedOrders++;
                 }
             }
 
-            std::cout << std::endl;
-            std::cout << "⏳ Waiting for acknowledgments..." << std::endl;
+            logger->info("Waiting for acknowledgments...");
 
             // Wait for acknowledgments with timeout
             auto waitStart = std::chrono::steady_clock::now();
@@ -395,7 +534,7 @@ int main(int argc, char* argv[]) {
                 // Check timeout
                 auto elapsed = std::chrono::steady_clock::now() - waitStart;
                 if (elapsed > waitTimeout) {
-                    std::cout << "⏰ Timeout waiting for acknowledgments" << std::endl;
+                    logger->warn("Timeout waiting for acknowledgments");
                     break;
                 }
 
@@ -407,44 +546,38 @@ int main(int argc, char* argv[]) {
         }
 
         // Final statistics
-        std::cout << std::endl;
-        std::cout << "📊 Final Results:" << std::endl;
-        std::cout << "=================" << std::endl;
+        logger->info("Final Results:");
+        logger->info("==============");
 
         ConnectionStats stats = client.get_connection_stats();
 
-        std::cout << "📤 Orders published: " << orderCount << std::endl;
-        std::cout << "✅ Orders acknowledged: " << acknowledgedOrders << std::endl;
-        std::cout << "❌ Orders failed: " << failedOrders << std::endl;
-        std::cout << "⏸️  Orders pending: " << (orderCount - acknowledgedOrders - failedOrders)
-                  << std::endl;
-        std::cout << std::endl;
+        logger->info("Orders published: {}", orderCount);
+        logger->info("Orders acknowledged: {}", acknowledgedOrders);
+        logger->info("Orders failed: {}", failedOrders);
+        logger->info("Orders pending: {}", orderCount - acknowledgedOrders - failedOrders);
 
-        std::cout << "🔗 Connection Statistics:" << std::endl;
-        std::cout << "   Messages sent: " << stats.messages_sent << std::endl;
-        std::cout << "   Messages received: " << stats.messages_received << std::endl;
-        std::cout << "   Messages acknowledged: " << stats.messages_acknowledged << std::endl;
-        std::cout << "   Messages failed: " << stats.messages_failed << std::endl;
-        std::cout << "   Connection attempts: " << stats.connection_attempts << std::endl;
-        std::cout << "   Successful connections: " << stats.successful_connections << std::endl;
-        std::cout << "   Leader redirects: " << stats.leader_redirects << std::endl;
+        logger->info("Connection Statistics:");
+        logger->info("  Messages sent: {}", stats.messages_sent);
+        logger->info("  Messages received: {}", stats.messages_received);
+        logger->info("  Messages acknowledged: {}", stats.messages_acknowledged);
+        logger->info("  Messages failed: {}", stats.messages_failed);
+        logger->info("  Connection attempts: {}", stats.connection_attempts);
+        logger->info("  Successful connections: {}", stats.successful_connections);
+        logger->info("  Leader redirects: {}", stats.leader_redirects);
 
         if (stats.total_uptime.count() > 0) {
-            std::cout << "   Total uptime: " << stats.total_uptime.count() << "ms" << std::endl;
+            logger->info("  Total uptime: {}ms", stats.total_uptime.count());
         }
 
         // Success rate calculation
         if (orderCount > 0) {
             double successRate = (double)acknowledgedOrders / orderCount * 100.0;
-            std::cout << "   Success rate: " << std::fixed << std::setprecision(1) << successRate
-                      << "%" << std::endl;
+            logger->info("  Success rate: {:.1f}%", successRate);
         }
 
         // Continue polling for a bit longer to catch any late messages
         if (running && (acknowledgedOrders + failedOrders) < orderCount) {
-            std::cout << std::endl;
-            std::cout << "🔄 Continuing to poll for late acknowledgments (10 seconds)..."
-                      << std::endl;
+            logger->info("Continuing to poll for late acknowledgments (10 seconds)...");
 
             auto extendedWaitStart = std::chrono::steady_clock::now();
             auto extendedTimeout = std::chrono::seconds(10);
@@ -462,36 +595,34 @@ int main(int argc, char* argv[]) {
 
             if ((acknowledgedOrders + failedOrders) >
                 stats.messages_acknowledged + stats.messages_failed) {
-                std::cout << "📨 Received additional acknowledgments!" << std::endl;
-                std::cout << "✅ Final acknowledged: " << acknowledgedOrders << std::endl;
-                std::cout << "❌ Final failed: " << failedOrders << std::endl;
+                logger->info("Received additional acknowledgments!");
+                logger->info("Final acknowledged: {}", acknowledgedOrders);
+                logger->info("Final failed: {}", failedOrders);
             }
         }
 
-        std::cout << std::endl;
-        std::cout << "🏁 Example completed successfully!" << std::endl;
+        logger->info("Example completed successfully!");
 
         if (!running) {
-            std::cout << "ℹ️  Shutdown requested by user" << std::endl;
+            logger->info("Shutdown requested by user");
         }
 
         // Disconnect gracefully
-        std::cout << "👋 Disconnecting from cluster..." << std::endl;
+        logger->info("Disconnecting from cluster...");
         client.disconnect();
 
         return 0;
 
     } catch (const std::exception& e) {
-        std::cerr << "💥 Fatal error: " << e.what() << std::endl;
-        std::cerr << std::endl;
-        std::cerr << "Common solutions:" << std::endl;
-        std::cerr << "• Check that Aeron Media Driver is running" << std::endl;
-        std::cerr << "• Verify cluster endpoints are correct and accessible" << std::endl;
-        std::cerr << "• Ensure proper permissions for Aeron directory" << std::endl;
-        std::cerr << "• Check firewall settings for UDP traffic" << std::endl;
-        std::cerr << "• Verify JsonCpp library is properly installed" << std::endl;
-        std::cerr << "• Try running with --check-only flag first" << std::endl;
-        std::cerr << "• Use --debug flag for more detailed error information" << std::endl;
+        logger->fatal("Fatal error: {}", e.what());
+        logger->error("Common solutions:");
+        logger->error("- Check that Aeron Media Driver is running");
+        logger->error("- Verify cluster endpoints are correct and accessible");
+        logger->error("- Ensure proper permissions for Aeron directory");
+        logger->error("- Check firewall settings for UDP traffic");
+        logger->error("- Verify JsonCpp library is properly installed");
+        logger->error("- Try running with --check-only flag first");
+        logger->error("- Use --debug flag for more detailed error information");
         return 1;
     }
 }

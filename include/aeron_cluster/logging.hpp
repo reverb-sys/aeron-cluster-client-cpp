@@ -9,9 +9,24 @@
 #include <mutex>
 #include <atomic>
 #include <functional>
-#include <source_location>
+// Note: source_location is C++20 only, we'll use a simpler approach
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <unordered_map>
+#include <vector>
+#include <stdexcept>
 
 namespace aeron_cluster {
+
+/**
+ * @brief Exception class for Aeron Cluster operations
+ */
+class AeronClusterException : public std::runtime_error {
+public:
+    explicit AeronClusterException(const std::string& message) : std::runtime_error(message) {}
+    explicit AeronClusterException(const char* message) : std::runtime_error(message) {}
+};
 
 /**
  * @brief Log levels in order of severity
@@ -56,15 +71,15 @@ struct LogEntry {
     int line_number;
     
     LogEntry(LogLevel lvl, std::string msg, std::string_view logger,
-             const std::source_location& loc = std::source_location::current())
+             const char* file = "unknown", const char* func = "unknown", int line = 0)
         : timestamp(std::chrono::system_clock::now())
         , level(lvl)
         , message(std::move(msg))
         , logger_name(logger)
         , thread_id(std::this_thread::get_id())
-        , file_name(loc.file_name())
-        , function_name(loc.function_name())
-        , line_number(static_cast<int>(loc.line())) {}
+        , file_name(file)
+        , function_name(func)
+        , line_number(line) {}
 };
 
 /**
@@ -248,8 +263,7 @@ public:
     }
     
     template<typename... Args>
-    void log(LogLevel level, std::string_view format, Args&&... args,
-             const std::source_location& loc = std::source_location::current()) {
+    void log(LogLevel level, std::string_view format, Args&&... args) {
         if (level < level_.load(std::memory_order_relaxed)) {
             return;
         }
@@ -261,7 +275,7 @@ public:
             message = formatMessage(format, std::forward<Args>(args)...);
         }
         
-        LogEntry entry(level, std::move(message), name_, loc);
+        LogEntry entry(level, std::move(message), name_, "unknown", "unknown", 0);
         
         std::lock_guard<std::mutex> lock(sinks_mutex_);
         for (auto& sink : sinks_) {
@@ -272,39 +286,33 @@ public:
     }
     
     template<typename... Args>
-    void trace(std::string_view format, Args&&... args,
-               const std::source_location& loc = std::source_location::current()) {
-        log(LogLevel::TRACE, format, std::forward<Args>(args)..., loc);
+    void trace(std::string_view format, Args&&... args) {
+        log(LogLevel::TRACE, format, std::forward<Args>(args)...);
     }
     
     template<typename... Args>
-    void debug(std::string_view format, Args&&... args,
-               const std::source_location& loc = std::source_location::current()) {
-        log(LogLevel::DEBUG, format, std::forward<Args>(args)..., loc);
+    void debug(std::string_view format, Args&&... args) {
+        log(LogLevel::DEBUG, format, std::forward<Args>(args)...);
     }
     
     template<typename... Args>
-    void info(std::string_view format, Args&&... args,
-              const std::source_location& loc = std::source_location::current()) {
-        log(LogLevel::INFO, format, std::forward<Args>(args)..., loc);
+    void info(std::string_view format, Args&&... args) {
+        log(LogLevel::INFO, format, std::forward<Args>(args)...);
     }
     
     template<typename... Args>
-    void warn(std::string_view format, Args&&... args,
-              const std::source_location& loc = std::source_location::current()) {
-        log(LogLevel::WARN, format, std::forward<Args>(args)..., loc);
+    void warn(std::string_view format, Args&&... args) {
+        log(LogLevel::WARN, format, std::forward<Args>(args)...);
     }
     
     template<typename... Args>
-    void error(std::string_view format, Args&&... args,
-               const std::source_location& loc = std::source_location::current()) {
-        log(LogLevel::ERROR, format, std::forward<Args>(args)..., loc);
+    void error(std::string_view format, Args&&... args) {
+        log(LogLevel::ERROR, format, std::forward<Args>(args)...);
     }
     
     template<typename... Args>
-    void fatal(std::string_view format, Args&&... args,
-               const std::source_location& loc = std::source_location::current()) {
-        log(LogLevel::FATAL, format, std::forward<Args>(args)..., loc);
+    void fatal(std::string_view format, Args&&... args) {
+        log(LogLevel::FATAL, format, std::forward<Args>(args)...);
     }
     
     void flush() {
