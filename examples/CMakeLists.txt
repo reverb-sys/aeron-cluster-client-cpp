@@ -60,11 +60,26 @@ target_link_libraries(commit_resume_example
 #    set_target_warnings(production_example)
 #endif()
 
+# Pub/Sub Reconnect Test
+add_executable(pubsub_reconnect_test
+    pubsub_reconnect_test.cpp
+)
+
+target_link_libraries(pubsub_reconnect_test
+    PRIVATE
+        aeron-cluster-cpp
+)
+
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(pubsub_reconnect_test)
+#endif()
+
 # Install examples
 install(TARGETS 
     basic_client_example
     order_publishing_example
     advanced_features_example
     commit_resume_example
+    pubsub_reconnect_test
     DESTINATION ${CMAKE_INSTALL_BINDIR}/examples
 )

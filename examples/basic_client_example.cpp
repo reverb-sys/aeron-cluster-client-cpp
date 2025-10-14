@@ -428,7 +428,7 @@ int main(int argc, char* argv[]) {
                     try {
                         // Generate unique instance identifier for load balancing
                         std::string instance_id = "cpp_client_" + std::to_string(getpid()) + "_" + std::to_string(std::time(nullptr));
-                        client.send_subscription_request("order_request_topic", "ROHIT_AERON01_TX", "LAST_COMMIT", instance_id);
+                        client.send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", "LAST_COMMIT", instance_id);
                         logger->info("Subscription request sent!");
                         subscriptionSent = true;
                     } catch (const std::exception& e) {
