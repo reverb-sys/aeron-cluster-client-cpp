@@ -14,6 +14,7 @@
 #include <mutex>
 #include <vector>
 #include <json/json.h>
+#include <algorithm>
 
 using namespace aeron_cluster;
 
@@ -29,6 +30,15 @@ std::atomic<int> messages_received{0};
 std::mutex message_mutex;
 std::set<std::string> received_message_ids;
 
+// Message comparison tracking
+std::set<std::string> published_message_ids;
+std::set<std::string> received_message_ids_comparison;
+std::mutex comparison_mutex;
+
+// Publisher completion tracking
+std::atomic<bool> publisher_finished{false};
+std::chrono::steady_clock::time_point publisher_finish_time;
+
 // For multi-identifier test
 std::map<std::string, int> messages_published_by_identifier;
 std::map<std::string, int> messages_received_by_identifier;
@@ -37,6 +47,69 @@ std::mutex identifier_mutex;
 void signalHandler(int signal) {
     logger->info("Received signal {}, shutting down gracefully...", signal);
     running = false;
+}
+
+void printMessageComparison() {
+    std::lock_guard<std::mutex> lock(comparison_mutex);
+    
+    logger->info("========================================");
+    logger->info("MESSAGE COMPARISON ANALYSIS");
+    logger->info("========================================");
+    
+    logger->info("Published Messages: {}", published_message_ids.size());
+    logger->info("Received Messages: {}", received_message_ids_comparison.size());
+    
+    // Find missing messages (published but not received)
+    std::set<std::string> missing_messages;
+    for (const auto& published_id : published_message_ids) {
+        if (received_message_ids_comparison.find(published_id) == received_message_ids_comparison.end()) {
+            missing_messages.insert(published_id);
+        }
+    }
+    
+    // Find extra messages (received but not published)
+    std::set<std::string> extra_messages;
+    for (const auto& received_id : received_message_ids_comparison) {
+        if (published_message_ids.find(received_id) == published_message_ids.end()) {
+            extra_messages.insert(received_id);
+        }
+    }
+    
+    logger->info("Missing Messages: {}", missing_messages.size());
+    if (!missing_messages.empty()) {
+        logger->error("MISSING MESSAGE IDs:");
+        int count = 0;
+        for (const auto& missing_id : missing_messages) {
+            logger->error("  {}: {}...", count + 1, missing_id.substr(0, 20));
+            count++;
+            if (count >= 10) { // Limit to first 10 missing messages
+                logger->error("  ... and {} more missing messages", missing_messages.size() - 10);
+                break;
+            }
+        }
+    }
+    
+    logger->info("Extra Messages: {}", extra_messages.size());
+    if (!extra_messages.empty()) {
+        logger->warn("EXTRA MESSAGE IDs (received but not published):");
+        int count = 0;
+        for (const auto& extra_id : extra_messages) {
+            logger->warn("  {}: {}...", count + 1, extra_id.substr(0, 20));
+            count++;
+            if (count >= 10) { // Limit to first 10 extra messages
+                logger->warn("  ... and {} more extra messages", extra_messages.size() - 10);
+                break;
+            }
+        }
+    }
+    
+    // Calculate success rate
+    if (!published_message_ids.empty()) {
+        double success_rate = (static_cast<double>(published_message_ids.size() - missing_messages.size()) / published_message_ids.size()) * 100.0;
+        logger->info("Success Rate: {:.2f}%", success_rate);
+    }
+    
+    logger->info("========================================");
 }
 
 void printUsage() {
@@ -66,6 +139,7 @@ void printUsage() {
     std::cout << "\nReconnect Test Options:" << std::endl;
     std::cout << "  --disconnect-at N   Disconnect subscriber after N messages (default: 30)" << std::endl;
     std::cout << "  --reconnect-delay MS Delay before reconnecting subscriber (default: 2000)" << std::endl;
+    std::cout << "  --timeout MS        Timeout after publisher finishes (default: 5000)" << std::endl;
     std::cout << "\nIdentifier Filter Test Options:" << std::endl;
     std::cout << "  --subscribe-to ID   Identifier to subscribe to (default: IDENTIFIER_A)" << std::endl;
     std::cout << "  --identifiers LIST  Comma-separated list of identifiers to publish to" << std::endl;
@@ -160,12 +234,18 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
-                publisher.publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
+                std::string actualMessageId = publisher.publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
                 
                 messages_published++;
                 
+                // Track published message ID for comparison (use the actual ID returned by cluster client)
+                {
+                    std::lock_guard<std::mutex> lock(comparison_mutex);
+                    published_message_ids.insert(actualMessageId);
+                }
+                
                 pub_logger->info("Published message {}/{}: {} with identifier ROHIT_AERON01_TX (ID: {}...)", 
-                              messages_published.load(), messageCount, side, messageId.substr(0, 12));
+                              messages_published.load(), messageCount, side, actualMessageId.substr(0, 12));
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -182,6 +262,10 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
         
         pub_logger->info("Publisher finished! Total published: {}", messages_published.load());
         
+        // Mark publisher as finished
+        publisher_finished = true;
+        publisher_finish_time = std::chrono::steady_clock::now();
+        
         // Disconnect
         publisher.disconnect();
         
@@ -191,7 +275,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
 }
 
 // Subscriber thread function
-void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int reconnectDelayMs, int totalMessages) {
+void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int reconnectDelayMs, int totalMessages, int timeoutMs) {
     auto sub_logger = LoggerFactory::instance().getLogger("subscriber");
     
     try {
@@ -212,6 +296,12 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 if (received_message_ids.find(result.message_id) == received_message_ids.end()) {
                     received_message_ids.insert(result.message_id);
                     messages_received++;
+                    
+                    // Track received message ID for comparison
+                    {
+                        std::lock_guard<std::mutex> lock(comparison_mutex);
+                        received_message_ids_comparison.insert(result.message_id);
+                    }
                     
                     sub_logger->info("Received ORDER message {}: Type={}, ID={}...", 
                                   messages_received.load(), 
@@ -244,10 +334,15 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         bool first_connection = true;
         bool disconnected_intentionally = false;
         
-        // Generate a consistent instance ID for this subscriber (doesn't change on reconnect)
-        std::string consistent_instance_id = "cpp_test_subscriber_" + std::to_string(getpid());
+        int connection_attempt = 0;
         
         while (running) {
+            connection_attempt++;
+            
+            // Generate a NEW instance ID for each connection attempt to avoid cluster rejecting reconnections
+            // The cluster needs time to clean up the previous session with the same instance ID
+            std::string instance_id = "cpp_test_subscriber_" + std::to_string(getpid()) + "_" + std::to_string(connection_attempt);
+            sub_logger->info("Using instance ID: {}", instance_id);
             // Connect to cluster
             sub_logger->info("Connecting subscriber to cluster...");
             if (!subscriber.connect()) {
@@ -292,9 +387,9 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             try {
                 std::string replay_position = first_connection ? "LAST_COMMIT" : "LAST_COMMIT";
                 
-                sub_logger->info("Sending subscription request for order_notification_topic with identifier ROHIT_AERON01_TX and instance {}...", consistent_instance_id);
-                subscriber.send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", replay_position, consistent_instance_id);
-                sub_logger->info("Subscription request sent with instance: {}", consistent_instance_id);
+                sub_logger->info("Sending subscription request for order_notification_topic with identifier ROHIT_AERON01_TX and instance {}...", instance_id);
+                subscriber.send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", replay_position, instance_id);
+                sub_logger->info("Subscription request sent with instance: {}", instance_id);
             } catch (const std::exception& e) {
                 sub_logger->error("Failed to send subscription request: {}", e.what());
                 sub_logger->warn("Disconnecting and will retry...");
@@ -333,10 +428,28 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     subscriber.disconnect();
                     disconnected_intentionally = true;
                     
-                    // Wait before reconnecting
-                    sub_logger->info("Waiting {}ms before reconnecting...", reconnectDelayMs);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(reconnectDelayMs));
+                    // Wait before reconnecting - cluster needs time to clean up the previous session
+                    // Minimum recommended: 2000ms (2 seconds)
+                    int actual_delay = std::max(reconnectDelayMs, 2000);
+                    if (reconnectDelayMs < 2000) {
+                        sub_logger->warn("Reconnect delay {}ms is too short, using {}ms instead", reconnectDelayMs, actual_delay);
+                    }
+                    sub_logger->info("Waiting {}ms before reconnecting to allow cluster cleanup...", actual_delay);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(actual_delay));
                     break; // Break inner loop to reconnect
+                }
+                
+                // Check if publisher is finished and timeout has elapsed
+                if (publisher_finished.load()) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - publisher_finish_time).count();
+                    
+                    if (elapsed >= timeoutMs) {
+                        sub_logger->info("Publisher finished {}ms ago, timeout reached. Stopping subscriber.", elapsed);
+                        sub_logger->info("Final message count: Received={}, Published={}", messages_received.load(), messages_published.load());
+                        running = false;
+                        break;
+                    }
                 }
                 
                 // Check if we've received all messages
@@ -455,9 +568,15 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
-                publisher.publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
+                std::string actualMessageId = publisher.publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
                 
                 messages_published++;
+                
+                // Track published message ID for comparison (use the actual ID returned by cluster client)
+                {
+                    std::lock_guard<std::mutex> lock(comparison_mutex);
+                    published_message_ids.insert(actualMessageId);
+                }
                 
                 // Track by identifier
                 {
@@ -466,7 +585,7 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 }
                 
                 pub_logger->info("Published message {}/{}: {} with identifier {} (ID: {}...)", 
-                              messages_published.load(), messageCount, side, identifier, messageId.substr(0, 12));
+                              messages_published.load(), messageCount, side, identifier, actualMessageId.substr(0, 12));
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -482,6 +601,10 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
         }
         
         pub_logger->info("Publisher finished! Total published: {}", messages_published.load());
+        
+        // Mark publisher as finished
+        publisher_finished = true;
+        publisher_finish_time = std::chrono::steady_clock::now();
         
         // Log breakdown by identifier
         {
@@ -501,7 +624,7 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
 }
 
 // Multi-identifier subscriber thread function - subscribes to only ONE specific identifier
-void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const std::string& subscribeToIdentifier, int totalMessages) {
+void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const std::string& subscribeToIdentifier, int totalMessages, int timeoutMs) {
     auto sub_logger = LoggerFactory::instance().getLogger("multi-subscriber");
     
     try {
@@ -551,6 +674,12 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
                     received_message_ids.insert(result.message_id);
                     messages_received++;
                     
+                    // Track received message ID for comparison
+                    {
+                        std::lock_guard<std::mutex> lock(comparison_mutex);
+                        received_message_ids_comparison.insert(result.message_id);
+                    }
+                    
                     // Track by identifier
                     {
                         std::lock_guard<std::mutex> id_lock(identifier_mutex);
@@ -594,10 +723,14 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
         
         bool first_connection = true;
         
-        // Generate a consistent instance ID for this subscriber
-        std::string consistent_instance_id = "cpp_test_multi_subscriber_" + std::to_string(getpid());
+        int connection_attempt = 0;
         
         while (running) {
+            connection_attempt++;
+            
+            // Generate a NEW instance ID for each connection attempt to avoid cluster rejecting reconnections
+            std::string instance_id = "cpp_test_multi_subscriber_" + std::to_string(getpid()) + "_" + std::to_string(connection_attempt);
+            sub_logger->info("Using instance ID: {}", instance_id);
             // Connect to cluster
             sub_logger->info("Connecting subscriber to cluster...");
             if (!subscriber.connect()) {
@@ -643,8 +776,8 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
                 std::string replay_position = first_connection ? "LAST_COMMIT" : "LAST_COMMIT";
                 
                 sub_logger->info("Sending subscription request for order_notification_topic with identifier {} and instance {}...", 
-                              subscribeToIdentifier, consistent_instance_id);
-                subscriber.send_subscription_request("order_notification_topic", subscribeToIdentifier, replay_position, consistent_instance_id);
+                              subscribeToIdentifier, instance_id);
+                subscriber.send_subscription_request("order_notification_topic", subscribeToIdentifier, replay_position, instance_id);
                 sub_logger->info("Subscription request sent - should ONLY receive messages with identifier: {}", subscribeToIdentifier);
             } catch (const std::exception& e) {
                 sub_logger->error("Failed to send subscription request: {}", e.what());
@@ -690,6 +823,19 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
                     sub_logger->info("Test complete!");
                     running = false;
                     break;
+                }
+                
+                // Check if publisher is finished and timeout has elapsed
+                if (publisher_finished.load()) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - publisher_finish_time).count();
+                    
+                    if (elapsed >= timeoutMs) {
+                        sub_logger->info("Publisher finished {}ms ago, timeout reached. Stopping subscriber.", elapsed);
+                        sub_logger->info("Final message count: Received={}, Published={}", messages_received.load(), messages_published.load());
+                        running = false;
+                        break;
+                    }
                 }
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -741,6 +887,7 @@ int main(int argc, char* argv[]) {
     int messageInterval = 100;  // milliseconds
     int disconnectAt = 30;
     int reconnectDelay = 2000;  // milliseconds
+    int timeoutMs = 5000;  // milliseconds
     
     // Multi-identifier test options
     std::string subscribeToIdentifier = "IDENTIFIER_A";
@@ -768,6 +915,8 @@ int main(int argc, char* argv[]) {
             disconnectAt = std::stoi(argv[++i]);
         } else if (arg == "--reconnect-delay" && i + 1 < argc) {
             reconnectDelay = std::stoi(argv[++i]);
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            timeoutMs = std::stoi(argv[++i]);
         } else if (arg == "--subscribe-to" && i + 1 < argc) {
             subscribeToIdentifier = argv[++i];
         } else if (arg == "--identifiers" && i + 1 < argc) {
@@ -816,6 +965,7 @@ int main(int argc, char* argv[]) {
     if (testMode == "reconnect") {
         logger->info("Disconnect after: {} messages", disconnectAt);
         logger->info("Reconnect delay: {}ms", reconnectDelay);
+        logger->info("Timeout after publisher finishes: {}ms", timeoutMs);
     } else {
         logger->info("Subscribe to identifier: {}", subscribeToIdentifier);
         std::string identifiersStr;
@@ -863,7 +1013,7 @@ int main(int argc, char* argv[]) {
             
             // Start subscriber thread first
             logger->info("Starting subscriber thread...");
-            std::thread subscriber(subscriberThread, std::ref(sub_config), disconnectAt, reconnectDelay, messageCount);
+            std::thread subscriber(subscriberThread, std::ref(sub_config), disconnectAt, reconnectDelay, messageCount, timeoutMs);
             
             // Wait a bit for subscriber to connect and subscribe
             std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -886,6 +1036,9 @@ int main(int argc, char* argv[]) {
             logger->info("Messages Published: {}", messages_published.load());
             logger->info("Messages Received: {}", messages_received.load());
             logger->info("Unique Messages Received: {}", received_message_ids.size());
+            
+            // Print detailed message comparison
+            printMessageComparison();
             
             bool success = (messages_published == messages_received) && 
                           (messages_received == messageCount) &&
@@ -915,7 +1068,7 @@ int main(int argc, char* argv[]) {
             
             // Start subscriber thread first
             logger->info("Starting multi-identifier subscriber thread...");
-            std::thread subscriber(multiIdentifierSubscriberThread, std::ref(sub_config), subscribeToIdentifier, messageCount);
+            std::thread subscriber(multiIdentifierSubscriberThread, std::ref(sub_config), subscribeToIdentifier, messageCount, timeoutMs);
             
             // Wait a bit for subscriber to connect and subscribe
             std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -938,6 +1091,9 @@ int main(int argc, char* argv[]) {
             logger->info("Messages Published: {}", messages_published.load());
             logger->info("Messages Received: {}", messages_received.load());
             logger->info("Unique Messages Received: {}", received_message_ids.size());
+            
+            // Print detailed message comparison
+            printMessageComparison();
             
             logger->info("\nBreakdown by Identifier:");
             logger->info("Published:");

@@ -113,7 +113,13 @@ class SessionManager::Impl {
     }
 
     bool is_connected() const {
-        return connected_ && ingress_publication_ && ingress_publication_->isConnected();
+        try {
+            return connected_ && ingress_publication_ && ingress_publication_->isConnected() &&
+                   session_id_ > 0 && leadership_term_id_ > 0;
+        } catch (const std::exception& e) {
+            // If checking connection throws an exception, consider it disconnected
+            return false;
+        }
     }
 
     std::int64_t get_session_id() const {
