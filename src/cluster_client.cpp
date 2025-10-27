@@ -183,6 +183,11 @@ class ClusterClient::Impl {
             return;
         }
 
+        DEBUG_LOG("Disconnecting client...");
+        
+        // Stop polling first to prevent interference with cleanup
+        stop_polling();
+        
         set_connection_state(ConnectionState::DISCONNECTED);
 
         if (session_manager_) {
@@ -195,11 +200,29 @@ class ClusterClient::Impl {
         stats_.current_session_id = -1;
         stats_.current_leader_id = -1;
         stats_.is_connected = false;
+        
+        DEBUG_LOG("Client disconnected successfully");
     }
 
     bool is_connected() const {
-        return connection_state_ == ConnectionState::CONNECTED && session_manager_ &&
-               session_manager_->is_connected();
+        // Basic connection state check
+        if (connection_state_ != ConnectionState::CONNECTED) {
+            return false;
+        }
+        
+        // Check session manager
+        if (!session_manager_ || !session_manager_->is_connected()) {
+            return false;
+        }
+        
+        // Only check egress subscription if it exists and we're past initial connection
+        // During initial connection, egress subscription might not be ready yet
+        if (egress_subscription_) {
+            return egress_subscription_->imageCount() > 0;
+        }
+        
+        // If egress subscription doesn't exist yet, consider connected if session manager is connected
+        return true;
     }
 
     ConnectionState get_connection_state() const {
@@ -905,6 +928,10 @@ class ClusterClient::Impl {
         try {
             aeron::Context context;
             context.aeronDir(config_.aeron_dir);
+            
+            // Note: Aeron doesn't have client-side keepalive configuration in Context
+            // Keepalive is handled at the Media Driver level on the server side
+            
             aeron_ = aeron::Aeron::connect(context);
             return true;
         } catch (const std::exception& e) {
@@ -1069,15 +1096,108 @@ class ClusterClient::Impl {
             connection_state_callback_(old_state, new_state);
         }
     }
+    
+    bool perform_connection_health_check() {
+        try {
+            // Check if Aeron is still connected
+            if (!aeron_) {
+                DEBUG_LOG("Health check failed: Aeron is null");
+                return false;
+            }
+            
+            // Check if session manager is still connected
+            if (!session_manager_ || !session_manager_->is_connected()) {
+                DEBUG_LOG("Health check failed: Session manager disconnected");
+                return false;
+            }
+            
+            // Only check egress subscription if it exists
+            if (egress_subscription_) {
+                if (egress_subscription_->imageCount() <= 0) {
+                    DEBUG_LOG("Health check failed: No active egress images");
+                    return false;
+                }
+            } else {
+                DEBUG_LOG("Health check warning: Egress subscription not yet created");
+                // Don't fail health check if egress subscription doesn't exist yet
+            }
+            
+            return true;
+        } catch (const std::exception& e) {
+            DEBUG_LOG("Health check exception: ", e.what());
+            return false;
+        }
+    }
 
     void polling_worker() {
+        auto last_health_check = std::chrono::steady_clock::now();
+        auto last_activity = std::chrono::steady_clock::now();
+        auto connection_start_time = std::chrono::steady_clock::now();
+        const auto health_check_interval = std::chrono::seconds(10); // Less frequent checks
+        const auto max_idle_time = std::chrono::seconds(60); // Longer idle timeout
+        const auto connection_grace_period = std::chrono::seconds(15); // Grace period for initial connection
+        
         while (polling_active_.load()) {
             try {
+                auto now = std::chrono::steady_clock::now();
+                bool is_in_grace_period = (now - connection_start_time) < connection_grace_period;
+                
+                // Reset grace period if we just connected
+                if (connection_state_ == ConnectionState::CONNECTED && is_in_grace_period) {
+                    // Check if this is a fresh connection (session manager just connected)
+                    if (session_manager_ && session_manager_->is_connected()) {
+                        DEBUG_LOG("Fresh connection detected, extending grace period");
+                        connection_start_time = now; // Reset grace period
+                        is_in_grace_period = true;
+                    }
+                }
+                
+                // During grace period, only check basic connection state
+                // After grace period, do full connection validation
+                if (!is_in_grace_period) {
+                    // Full connection check only after grace period
+                    if (!is_connected() || !egress_subscription_ || egress_subscription_->imageCount() <= 0) {
+                        DEBUG_LOG("Connection lost or no active images, stopping polling");
+                        set_connection_state(ConnectionState::DISCONNECTED);
+                        break; // Exit polling loop
+                    }
+                } else {
+                    // During grace period, only check if we're still trying to connect
+                    if (connection_state_ == ConnectionState::DISCONNECTED) {
+                        DEBUG_LOG("Connection state changed to DISCONNECTED during grace period");
+                        break;
+                    }
+                }
+                
+                // Periodic health check (less frequent)
+                if (now - last_health_check >= health_check_interval) {
+                    if (!perform_connection_health_check()) {
+                        // Only disconnect if we're past the grace period
+                        if (!is_in_grace_period) {
+                            DEBUG_LOG("Connection health check failed, disconnecting");
+                            set_connection_state(ConnectionState::DISCONNECTED);
+                            break;
+                        } else {
+                            DEBUG_LOG("Connection health check failed during grace period, continuing...");
+                        }
+                    }
+                    last_health_check = now;
+                }
+                
                 int processed = poll_messages(PerformanceConfig::DEFAULT_POLL_BATCH_SIZE);
-                if (processed == 0) {
+                if (processed > 0) {
+                    last_activity = now; // Update activity timestamp
+                } else {
+                    // Check for idle timeout (only after grace period)
+                    if (!is_in_grace_period && (now - last_activity >= max_idle_time)) {
+                        DEBUG_LOG("Client idle for too long, disconnecting");
+                        set_connection_state(ConnectionState::DISCONNECTED);
+                        break;
+                    }
                     std::this_thread::sleep_for(PerformanceConfig::POLL_INTERVAL);
                 }
             } catch (const std::exception& e) {
+                DEBUG_LOG("Polling error: ", e.what());
                 if (error_callback_) {
                     error_callback_("Polling error: " + std::string(e.what()));
                 }
