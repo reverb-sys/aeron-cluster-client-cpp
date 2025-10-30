@@ -1225,18 +1225,32 @@ ClusterClient::ClusterClient(const ClusterClientConfig& config)
     handler_.set_ack_callback([this](const AckInfo& ack) { this->on_ack_default(ack); });
 }
 
-ClusterClient::~ClusterClient() = default;
+ClusterClient::~ClusterClient() {
+    // Unregister this client from signal handling
+    SignalHandlerManager::instance().unregister_client(this);
+}
 
 std::future<bool> ClusterClient::connect_async() {
+    // Enable automatic signal handling on first connect
+    enable_automatic_signal_handling();
     return pImpl_->connect_async();
 }
 
 bool ClusterClient::connect() {
+    // Enable automatic signal handling on first connect
+    enable_automatic_signal_handling();
     return pImpl_->connect();
 }
 
 bool ClusterClient::connect_with_timeout(std::chrono::milliseconds timeout) {
+    // Enable automatic signal handling on first connect
+    enable_automatic_signal_handling();
     return pImpl_->connect_with_timeout(timeout);
+}
+
+void ClusterClient::enable_automatic_signal_handling() {
+    // Register this client for automatic signal handling
+    SignalHandlerManager::instance().register_client(shared_from_this());
 }
 
 void ClusterClient::disconnect() {

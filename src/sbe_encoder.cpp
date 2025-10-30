@@ -102,6 +102,32 @@ std::vector<uint8_t> SBEEncoder::encode_session_keep_alive(int64_t leadershipTer
     return message;
 }
 
+std::vector<uint8_t> SBEEncoder::encode_session_close_request(int64_t leadershipTermId,
+                                                              int64_t clusterSessionId) {
+    std::vector<uint8_t> message;
+    message.resize(SBEConstants::SBE_HEADER_LENGTH + 16);  // Header + close request data
+
+    size_t offset = 0;
+
+    // SBE Header
+    write_uint_16(message, offset, 16);  // block length
+    offset += 2;
+    write_uint_16(message, offset, SBEConstants::SESSION_CLOSE_TEMPLATE_ID);  // template ID
+    offset += 2;
+    write_uint_16(message, offset, SBEConstants::CLUSTER_SCHEMA_ID);  // schema ID
+    offset += 2;
+    write_uint_16(message, offset, SBEConstants::CLUSTER_SCHEMA_VERSION);  // schema version
+    offset += 2;
+
+    // Close request data (16 bytes)
+    write_int_64(message, offset, leadershipTermId);
+    offset += 8;
+    write_int_64(message, offset, clusterSessionId);
+    offset += 8;
+
+    return message;
+}
+
 std::vector<uint8_t> SBEEncoder::encode_topic_message(
     const std::string& topic, const std::string& messageType, const std::string& uuid,
     const std::string& payload, const std::string& headers, int64_t timestamp) {
