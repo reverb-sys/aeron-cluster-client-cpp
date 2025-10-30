@@ -172,16 +172,16 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
         pub_logger->info("Starting publisher thread...");
         
         // Create publisher client
-        ClusterClient publisher(config);
+        auto publisher = std::make_shared<ClusterClient>(config);
         
         pub_logger->info("Connecting publisher to cluster...");
-        if (!publisher.connect()) {
+        if (!publisher->connect()) {
             pub_logger->error("Failed to connect publisher to cluster");
             return;
         }
         
         pub_logger->info("Publisher connected successfully!");
-        pub_logger->info("Session ID: {}", publisher.get_session_id());
+        pub_logger->info("Session ID: {}", publisher->get_session_id());
         
         // Publish messages
         pub_logger->info("Publishing {} messages to order_notification_topic...", messageCount);
@@ -234,7 +234,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
-                std::string actualMessageId = publisher.publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
+                std::string actualMessageId = publisher->publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
                 
                 messages_published++;
                 
@@ -253,7 +253,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 }
                 
                 // Poll for any responses
-                publisher.poll_messages(5);
+                publisher->poll_messages(5);
                 
             } catch (const std::exception& e) {
                 pub_logger->error("Failed to publish message {}: {}", i + 1, e.what());
@@ -267,7 +267,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
         publisher_finish_time = std::chrono::steady_clock::now();
         
         // Disconnect
-        publisher.disconnect();
+        publisher->disconnect();
         
     } catch (const std::exception& e) {
         pub_logger->error("Publisher thread error: {}", e.what());
@@ -282,10 +282,10 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         sub_logger->info("Starting subscriber thread...");
         
         // Create subscriber client
-        ClusterClient subscriber(config);
+        auto subscriber = std::make_shared<ClusterClient>(config);
         
         // Set up message callback
-        subscriber.set_message_callback([&](const aeron_cluster::ParseResult& result) {
+        subscriber->set_message_callback([&](const aeron_cluster::ParseResult& result) {
             // Only count ORDER messages, not acknowledgments
             if (result.is_order_message() || 
                 (result.is_topic_message() && result.message_type == "CREATE_ORDER")) {
@@ -321,7 +321,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         
         // Set up connection state callback to detect session closures
         bool session_closed_by_cluster = false;
-        subscriber.set_connection_state_callback([&](aeron_cluster::ConnectionState old_state, 
+        subscriber->set_connection_state_callback([&](aeron_cluster::ConnectionState old_state, 
                                                      aeron_cluster::ConnectionState new_state) {
             sub_logger->info("Connection state changed: {} -> {}", 
                           static_cast<int>(old_state), static_cast<int>(new_state));
@@ -345,7 +345,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             sub_logger->info("Using instance ID: {}", instance_id);
             // Connect to cluster
             sub_logger->info("Connecting subscriber to cluster...");
-            if (!subscriber.connect()) {
+            if (!subscriber->connect()) {
                 sub_logger->error("Failed to connect subscriber to cluster");
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
@@ -354,22 +354,22 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             sub_logger->info("Subscriber connected successfully!");
             
             // Wait for session to be fully established
-            int64_t session_id = subscriber.get_session_id();
+            int64_t session_id = subscriber->get_session_id();
             int wait_attempts = 0;
             const int max_wait_attempts = 50; // 5 seconds max
             
             while (session_id == -1 && wait_attempts < max_wait_attempts && running) {
                 sub_logger->debug("Waiting for session to be established... (attempt {})", wait_attempts + 1);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                subscriber.poll_messages(5); // Poll to process session messages
-                session_id = subscriber.get_session_id();
+                subscriber->poll_messages(5); // Poll to process session messages
+                session_id = subscriber->get_session_id();
                 wait_attempts++;
             }
             
             if (session_id == -1) {
                 sub_logger->error("Failed to establish session (Session ID still -1)");
                 sub_logger->warn("Disconnecting and will retry...");
-                subscriber.disconnect();
+                subscriber->disconnect();
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
@@ -377,7 +377,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             sub_logger->info("Session established! Session ID: {}", session_id);
             
             // Verify connection is still active before sending subscription
-            if (!subscriber.is_connected()) {
+            if (!subscriber->is_connected()) {
                 sub_logger->error("Connection lost after session establishment");
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
@@ -388,12 +388,12 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 std::string replay_position = first_connection ? "LAST_COMMIT" : "LAST_COMMIT";
                 
                 sub_logger->info("Sending subscription request for order_notification_topic with identifier ROHIT_AERON01_TX and instance {}...", instance_id);
-                subscriber.send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", replay_position, instance_id);
+                subscriber->send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", replay_position, instance_id);
                 sub_logger->info("Subscription request sent with instance: {}", instance_id);
             } catch (const std::exception& e) {
                 sub_logger->error("Failed to send subscription request: {}", e.what());
                 sub_logger->warn("Disconnecting and will retry...");
-                subscriber.disconnect();
+                subscriber->disconnect();
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
@@ -405,8 +405,8 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             
             // Poll messages until disconnect condition
             int poll_count = 0;
-            while (running && subscriber.is_connected()) {
-                int messagesPolled = subscriber.poll_messages(10);
+            while (running && subscriber->is_connected()) {
+                int messagesPolled = subscriber->poll_messages(10);
                 
                 if (messagesPolled > 0) {
                     sub_logger->debug("Polled {} messages", messagesPolled);
@@ -417,7 +417,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 // Check if cluster closed the session (back pressure, etc.)
                 if (session_closed_by_cluster) {
                     sub_logger->warn("Detected session closure by cluster, will reconnect...");
-                    subscriber.disconnect();
+                    subscriber->disconnect();
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     break; // Break to reconnect
                 }
@@ -425,7 +425,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 // Check if we should disconnect intentionally
                 if (!disconnected_intentionally && messages_received >= disconnectAt) {
                     sub_logger->warn("Reached disconnect threshold ({} messages), disconnecting...", disconnectAt);
-                    subscriber.disconnect();
+                    subscriber->disconnect();
                     disconnected_intentionally = true;
                     
                     // Wait before reconnecting - cluster needs time to clean up the previous session
@@ -459,7 +459,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     
                     // Final check
-                    subscriber.poll_messages(10);
+                    subscriber->poll_messages(10);
                     
                     if (messages_received >= totalMessages) {
                         sub_logger->info("Test complete! All messages received.");
@@ -477,7 +477,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             }
             
             // If disconnected but still running, reconnect
-            if (!subscriber.is_connected() && running) {
+            if (!subscriber->is_connected() && running) {
                 sub_logger->info("Subscriber disconnected, will reconnect...");
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
@@ -486,8 +486,8 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         sub_logger->info("Subscriber finished! Total received: {}", messages_received.load());
         
         // Disconnect
-        if (subscriber.is_connected()) {
-            subscriber.disconnect();
+        if (subscriber->is_connected()) {
+            subscriber->disconnect();
         }
         
     } catch (const std::exception& e) {

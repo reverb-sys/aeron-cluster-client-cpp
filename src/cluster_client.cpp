@@ -1250,7 +1250,14 @@ bool ClusterClient::connect_with_timeout(std::chrono::milliseconds timeout) {
 
 void ClusterClient::enable_automatic_signal_handling() {
     // Register this client for automatic signal handling
-    SignalHandlerManager::instance().register_client(shared_from_this());
+    // shared_from_this() throws std::bad_weak_ptr if not owned by std::shared_ptr
+    try {
+        auto self = shared_from_this();
+        SignalHandlerManager::instance().register_client(self);
+    } catch (const std::bad_weak_ptr&) {
+        // Client not managed by std::shared_ptr; skip auto signal handling
+        // Users can still register manually by creating the client in a shared_ptr
+    }
 }
 
 void ClusterClient::disconnect() {
