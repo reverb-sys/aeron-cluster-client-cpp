@@ -162,6 +162,7 @@ namespace SBEConstants {
     // Template IDs
     constexpr std::uint16_t SESSION_CONNECT_TEMPLATE_ID = 3;
     constexpr std::uint16_t SESSION_EVENT_TEMPLATE_ID = 2;
+    constexpr std::uint16_t SESSION_CLOSE_TEMPLATE_ID = 4;
     constexpr std::uint16_t SESSION_KEEPALIVE_TEMPLATE_ID = 5;
     constexpr std::uint16_t TOPIC_MESSAGE_TEMPLATE_ID = 1;
     constexpr std::uint16_t ACKNOWLEDGMENT_TEMPLATE_ID = 2;
@@ -172,11 +173,11 @@ namespace SBEConstants {
     constexpr std::uint16_t TOPIC_MESSAGE_BLOCK_LENGTH = 48;
     constexpr std::uint16_t ACKNOWLEDGMENT_BLOCK_LENGTH = 8;
     
-    // Session event codes
+    // Session event codes (matching Java EventCode enum)
     constexpr std::int32_t SESSION_EVENT_OK = 0;
     constexpr std::int32_t SESSION_EVENT_ERROR = 1;
-    constexpr std::int32_t SESSION_EVENT_AUTHENTICATION_REJECTED = 2;
-    constexpr std::int32_t SESSION_EVENT_REDIRECT = 3;
+    constexpr std::int32_t SESSION_EVENT_REDIRECT = 2;  // Redirect to leader member
+    constexpr std::int32_t SESSION_EVENT_AUTHENTICATION_REJECTED = 3;
     constexpr std::int32_t SESSION_EVENT_CLOSED = 4;
     
     // Header length

@@ -14,6 +14,7 @@
 #include "aeron_cluster/message_handler.hpp"
 #include "aeron_cluster/subscription.hpp"
 #include "aeron_cluster/protocol.hpp"
+#include "aeron_cluster/signal_handler.hpp"
 
 // Forward declarations
 namespace aeron_cluster {
@@ -64,7 +65,7 @@ enum class ConnectionState {
 /**
  * @brief High-level client for connecting to and interacting with Aeron Cluster
  */
-class ClusterClient {
+class ClusterClient : public std::enable_shared_from_this<ClusterClient> {
 public:
     /**
      * @brief Callback function type for handling received messages
@@ -103,6 +104,12 @@ public:
      * @return Future that resolves to true if successfully connected
      */
     std::future<bool> connect_async();
+    
+    /**
+     * @brief Register this client for automatic signal handling
+     * This enables graceful disconnection on SIGINT/SIGTERM signals
+     */
+    void enable_automatic_signal_handling();
 
     /**
      * @brief Connect to the Aeron Cluster (blocking)

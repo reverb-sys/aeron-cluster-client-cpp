@@ -71,6 +71,22 @@ struct SessionKeepAlive {
 static_assert(sizeof(SessionKeepAlive) == 16, "SessionKeepAlive must be exactly 16 bytes");
 
 /**
+ * @brief Session Close Request message (Template ID 4)
+ * Sent by client to gracefully close a session, allowing cluster to detect CLIENT_ACTION
+ */
+struct SessionCloseRequest {
+    std::int64_t leadership_term_id;
+    std::int64_t cluster_session_id;
+
+    static constexpr std::uint16_t sbe_block_length() { return 16; }
+    static constexpr std::uint16_t sbe_template_id() { return 4; }
+    static constexpr std::uint16_t sbe_schema_id() { return 111; }
+    static constexpr std::uint16_t sbe_schema_version() { return 8; }
+} __attribute__((packed));
+
+static_assert(sizeof(SessionCloseRequest) == 16, "SessionCloseRequest must be exactly 16 bytes");
+
+/**
  * @brief Topic Message for business data (Template ID 1)
  */
 struct TopicMessage {
@@ -125,6 +141,14 @@ public:
      * @brief Encode a SessionKeepAlive message
      */
     static std::vector<std::uint8_t> encode_session_keep_alive(
+        std::int64_t leadership_term_id,
+        std::int64_t cluster_session_id);
+
+    /**
+     * @brief Encode a SessionCloseRequest message
+     * This allows the cluster to detect disconnection as CLIENT_ACTION and properly clean up
+     */
+    static std::vector<std::uint8_t> encode_session_close_request(
         std::int64_t leadership_term_id,
         std::int64_t cluster_session_id);
 

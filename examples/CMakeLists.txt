@@ -74,6 +74,20 @@ target_link_libraries(pubsub_reconnect_test
 #    set_target_warnings(pubsub_reconnect_test)
 #endif()
 
+# Automatic Signal Handling Example
+add_executable(automatic_signal_handling_example
+    automatic_signal_handling_example.cpp
+)
+
+target_link_libraries(automatic_signal_handling_example
+    PRIVATE
+        aeron-cluster-cpp
+)
+
+#if(ENABLE_WARNINGS)
+#    set_target_warnings(automatic_signal_handling_example)
+#endif()
+
 # Install examples
 install(TARGETS 
     basic_client_example
@@ -81,5 +95,6 @@ install(TARGETS
     advanced_features_example
     commit_resume_example
     pubsub_reconnect_test
+    automatic_signal_handling_example
     DESTINATION ${CMAKE_INSTALL_BINDIR}/examples
 )

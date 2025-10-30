@@ -137,6 +137,7 @@ add_library(aeron-cluster-cpp STATIC
     src/config.cpp
     src/order_types.cpp
     src/commit_manager.cpp
+    src/signal_handler.cpp
 )
 
 # Set target properties

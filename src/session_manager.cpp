@@ -7,6 +7,7 @@
 #include <iostream>
 #include <random>
 #include <regex>
+#include <set>
 #include <thread>
 
 #include "aeron_cluster/sbe_messages.hpp"
@@ -32,6 +33,7 @@ class SessionManager::Impl {
           leader_member_id_(0),
           leadership_term_id_(-1),
           connected_(false),
+          redirected_to_member_id_(-1),
           rng_(std::random_device{}()),
           correlation_id_(generate_correlation_id()) {
         create_session_message_header_buffer();
@@ -57,9 +59,69 @@ class SessionManager::Impl {
                       << std::endl;
         }
 
+        // Track which members we've already tried to avoid loops
+        std::set<int> tried_members;
+
         // Try connecting to each cluster member
         for (int attempt = 0; attempt < config_.max_retries; ++attempt) {
+            // Check if we got redirected to a specific member from previous attempt
+            int redirect_target = redirected_to_member_id_.load();
+            if (redirect_target >= 0 && 
+                redirect_target < static_cast<int>(config_.cluster_endpoints.size()) &&
+                tried_members.find(redirect_target) == tried_members.end()) {
+                
+                tried_members.insert(redirect_target);
+                redirected_to_member_id_ = -1;  // Clear redirect flag
+                
+                if (config_.debug_logging) {
+                    std::cout << config_.logging.log_prefix
+                              << " Attempting connection to redirected leader member: "
+                              << redirect_target << std::endl;
+                }
+                
+                if (try_connect_to_member(redirect_target)) {
+                    result.success = true;
+                    result.session_id = session_id_;
+                    result.leader_member_id = leader_member_id_;
+                    result.leadership_term_id = leadership_term_id_;
+                    result.connection_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+
+                    if (config_.enable_console_info) {
+                        std::cout << config_.logging.log_prefix
+                                  << " Successfully connected to redirected member " << redirect_target
+                                  << " with session ID: " << session_id_ << std::endl;
+                    }
+
+                    // Start a keepalive thread that sends keepalive messages
+                    std::thread keepalive_thread_ = std::thread([this]() {
+                        while (is_connected()) {
+                            if (!send_keepalive()) {
+                                if (config_.enable_console_errors) {
+                                    std::cerr << config_.logging.log_prefix
+                                              << " Failed to send keepalive message" << std::endl;
+                                }
+                            }
+                            std::this_thread::sleep_for(config_.keepalive_interval);
+                        }
+                    });
+                    keepalive_thread_.detach();  // Detach to run independently
+
+                    return result;
+                }
+            }
+            
+            // Try all cluster members (skip ones we've already tried)
             for (size_t member_id = 0; member_id < config_.cluster_endpoints.size(); ++member_id) {
+                if (tried_members.find(static_cast<int>(member_id)) != tried_members.end()) {
+                    continue;  // Skip already tried members
+                }
+                
+                tried_members.insert(static_cast<int>(member_id));
+                
+                // Reset redirect flag before attempting connection
+                redirected_to_member_id_ = -1;
+                
                 if (try_connect_to_member(static_cast<int>(member_id))) {
                     result.success = true;
                     result.session_id = session_id_;
@@ -90,6 +152,18 @@ class SessionManager::Impl {
 
                     return result;
                 }
+                
+                // Check if we got redirected while trying this member
+                redirect_target = redirected_to_member_id_.load();
+                if (redirect_target >= 0 && redirect_target != static_cast<int>(member_id)) {
+                    // Got redirected, break inner loop and try redirected member in next iteration
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix
+                                  << " Redirect received to member " << redirect_target
+                                  << ", will retry with redirected member" << std::endl;
+                    }
+                    break;
+                }
             }
 
             if (attempt < config_.max_retries - 1) {
@@ -105,6 +179,50 @@ class SessionManager::Impl {
     void disconnect() {
         if (config_.debug_logging && connected_) {
             std::cout << config_.logging.log_prefix << " Disconnecting session..." << std::endl;
+        }
+
+        // Send SessionCloseRequest to notify cluster of CLIENT_ACTION disconnection
+        // This allows the cluster to properly detect and clean up the session
+        if (connected_ && ingress_publication_ && ingress_publication_->isConnected() &&
+            session_id_ > 0 && leadership_term_id_ > 0) {
+            try {
+                if (config_.debug_logging) {
+                    std::cout << config_.logging.log_prefix 
+                              << " Sending SessionCloseRequest (leadership_term_id=" 
+                              << leadership_term_id_ << ", session_id=" << session_id_ << ")"
+                              << std::endl;
+                }
+                
+                std::vector<std::uint8_t> close_request = 
+                    SBEEncoder::encode_session_close_request(leadership_term_id_, session_id_);
+                
+                // Try to send with retries (similar to how keepalive is sent)
+                int attempts = 3;
+                while (attempts > 0) {
+                    if (send_raw_message(close_request)) {
+                        if (config_.debug_logging) {
+                            std::cout << config_.logging.log_prefix 
+                                      << " SessionCloseRequest sent successfully" << std::endl;
+                        }
+                        break;
+                    }
+                    attempts--;
+                    if (attempts > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                }
+                
+                if (attempts == 0 && config_.debug_logging) {
+                    std::cout << config_.logging.log_prefix 
+                              << " Warning: Failed to send SessionCloseRequest (publication may be closed)"
+                              << std::endl;
+                }
+            } catch (const std::exception& e) {
+                if (config_.enable_console_errors) {
+                    std::cerr << config_.logging.log_prefix 
+                              << " Error sending SessionCloseRequest: " << e.what() << std::endl;
+                }
+            }
         }
 
         ingress_publication_.reset();
@@ -319,6 +437,7 @@ class SessionManager::Impl {
     std::int32_t leader_member_id_;
     std::int64_t leadership_term_id_;
     std::atomic<bool> connected_;
+    std::atomic<int> redirected_to_member_id_;  // Track redirects (-1 means no redirect)
     std::mt19937 rng_;
     std::int64_t correlation_id_;
     SessionStats stats_;
@@ -369,8 +488,38 @@ class SessionManager::Impl {
 
             leader_member_id_ = member_id;
 
-            // Wait briefly for session establishment
-            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            // Wait for session establishment with periodic checks
+            // The egress subscription polling thread needs time to process the response
+            auto session_timeout = std::chrono::seconds(10);
+            auto session_start = std::chrono::steady_clock::now();
+            
+            while ((std::chrono::steady_clock::now() - session_start) < session_timeout) {
+                if (connected_) {
+                    return true;  // Successfully connected
+                }
+                
+                // Check if we got redirected - if so, return false to let connect() handle the redirect
+                int redirect_target = redirected_to_member_id_.load();
+                if (redirect_target >= 0 && redirect_target != member_id) {
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix 
+                                  << " Got redirect to member " << redirect_target
+                                  << " while connecting to member " << member_id << std::endl;
+                    }
+                    return false;  // Return false so connect() can handle the redirect
+                }
+                
+                // Check every 100ms to allow polling thread to process messages
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            // Timeout - connection not established
+            if (config_.enable_console_warnings) {
+                std::cout << config_.logging.log_prefix 
+                          << " Session connection timeout after " 
+                          << std::chrono::duration_cast<std::chrono::seconds>(session_timeout).count()
+                          << " seconds" << std::endl;
+            }
             return connected_;
 
         } catch (const std::exception& e) {
@@ -636,13 +785,16 @@ class SessionManager::Impl {
     void handle_session_redirect(const ParseResult& result) {
         stats_.redirects_received++;
 
+        std::int32_t redirect_member_id = result.leader_member_id;
+        
         if (config_.enable_console_info) {
             std::cout << config_.logging.log_prefix
-                      << " Redirected to leader member: " << result.leader_member_id << std::endl;
+                      << " Redirected to leader member: " << redirect_member_id << std::endl;
         }
 
-        // Handle redirect logic here
-        leader_member_id_ = result.leader_member_id;
+        // Store the redirect target member ID so connect() can retry with that member
+        redirected_to_member_id_ = redirect_member_id;
+        leader_member_id_ = redirect_member_id;
     }
 
     void handle_session_ok(const ParseResult& result) {
