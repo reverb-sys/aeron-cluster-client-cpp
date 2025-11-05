@@ -37,6 +37,7 @@ class SessionManager::Impl {
           rng_(std::random_device{}()),
           correlation_id_(generate_correlation_id()) {
         create_session_message_header_buffer();
+        create_keepalive_buffer();
         if (config_.debug_logging) {
             std::cout << config_.logging.log_prefix
                       << " SessionManager created with correlation ID: " << correlation_id_
@@ -71,15 +72,18 @@ class SessionManager::Impl {
                 tried_members.find(redirect_target) == tried_members.end()) {
                 
                 tried_members.insert(redirect_target);
-                redirected_to_member_id_ = -1;  // Clear redirect flag
+                // Don't clear redirect flag yet - wait until connection succeeds
                 
-                if (config_.debug_logging) {
+                if (config_.enable_console_info || config_.debug_logging) {
                     std::cout << config_.logging.log_prefix
                               << " Attempting connection to redirected leader member: "
                               << redirect_target << std::endl;
                 }
                 
                 if (try_connect_to_member(redirect_target)) {
+                    // Only clear redirect flag on successful connection
+                    redirected_to_member_id_ = -1;
+                    
                     result.success = true;
                     result.session_id = session_id_;
                     result.leader_member_id = leader_member_id_;
@@ -109,6 +113,47 @@ class SessionManager::Impl {
 
                     return result;
                 }
+
+                // If redirected target failed, check if we got a NEW redirect while trying
+                int new_redirect = redirected_to_member_id_.load();
+                if (new_redirect >= 0 && new_redirect != redirect_target) {
+                    // Got a NEW redirect to a different member - keep it and remove old target
+                    tried_members.erase(redirect_target);
+                    // Keep new redirect flag set for next iteration
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix
+                                  << " Got new redirect to member " << new_redirect
+                                  << " while trying member " << redirect_target << std::endl;
+                    }
+                } else if (new_redirect < 0) {
+                    // No redirect anymore (shouldn't happen, but handle it)
+                    // Remove from tried_members to allow retry
+                    tried_members.erase(redirect_target);
+                    redirected_to_member_id_ = -1;
+                } else {
+                    // Same redirect target - keep it and allow retry
+                    tried_members.erase(redirect_target);
+                    // Keep redirect flag set for next iteration
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix
+                                  << " Connection to redirected member " << redirect_target
+                                  << " failed, will retry" << std::endl;
+                    }
+                }
+
+                // Skip trying other members in this iteration
+                // Wait a bit before retrying to avoid hammering the network
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            
+            // Check if we have a pending redirect - if so, skip normal member loop
+            int pending_redirect = redirected_to_member_id_.load();
+            if (pending_redirect >= 0) {
+                // We have a redirect that we haven't tried yet (it's in tried_members or out of range)
+                // Wait a bit and continue to next iteration to handle redirect
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
             }
             
             // Try all cluster members (skip ones we've already tried)
@@ -177,54 +222,89 @@ class SessionManager::Impl {
     }
 
     void disconnect() {
-        if (config_.debug_logging && connected_) {
-            std::cout << config_.logging.log_prefix << " Disconnecting session..." << std::endl;
+        // CRITICAL FIX: Always try to send close request if we have session info
+        // Even if connected_ is false, we might still have valid session_id and can notify server
+        bool should_send_close = (session_id_ > 0 && leadership_term_id_ > 0);
+        
+        if (config_.debug_logging) {
+            if (connected_) {
+                std::cout << config_.logging.log_prefix << " Disconnecting session (session_id=" 
+                          << session_id_ << ", leadership_term=" << leadership_term_id_ << ")..." << std::endl;
+            } else if (should_send_close) {
+                std::cout << config_.logging.log_prefix << " Disconnecting session (not connected but have session info, session_id=" 
+                          << session_id_ << ", leadership_term=" << leadership_term_id_ << ")..." << std::endl;
+            } else {
+                std::cout << config_.logging.log_prefix << " Disconnecting session (no session info available)..." << std::endl;
+            }
         }
 
         // Send SessionCloseRequest to notify cluster of CLIENT_ACTION disconnection
         // This allows the cluster to properly detect and clean up the session
-        if (connected_ && ingress_publication_ && ingress_publication_->isConnected() &&
-            session_id_ > 0 && leadership_term_id_ > 0) {
+        // CRITICAL FIX: Try to send even if publication connection check fails
+        if (should_send_close && ingress_publication_) {
+            bool publication_connected = false;
             try {
-                if (config_.debug_logging) {
-                    std::cout << config_.logging.log_prefix 
-                              << " Sending SessionCloseRequest (leadership_term_id=" 
-                              << leadership_term_id_ << ", session_id=" << session_id_ << ")"
-                              << std::endl;
-                }
-                
-                std::vector<std::uint8_t> close_request = 
-                    SBEEncoder::encode_session_close_request(leadership_term_id_, session_id_);
-                
-                // Try to send with retries (similar to how keepalive is sent)
-                int attempts = 3;
-                while (attempts > 0) {
-                    if (send_raw_message(close_request)) {
-                        if (config_.debug_logging) {
-                            std::cout << config_.logging.log_prefix 
-                                      << " SessionCloseRequest sent successfully" << std::endl;
-                        }
-                        break;
-                    }
-                    attempts--;
-                    if (attempts > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    }
-                }
-                
-                if (attempts == 0 && config_.debug_logging) {
-                    std::cout << config_.logging.log_prefix 
-                              << " Warning: Failed to send SessionCloseRequest (publication may be closed)"
-                              << std::endl;
-                }
+                publication_connected = ingress_publication_->isConnected();
             } catch (const std::exception& e) {
                 if (config_.enable_console_errors) {
                     std::cerr << config_.logging.log_prefix 
-                              << " Error sending SessionCloseRequest: " << e.what() << std::endl;
+                              << " Error checking publication connection: " << e.what() << std::endl;
+                }
+                // Continue anyway - try to send close request
+            }
+            
+            if (publication_connected || connected_) {
+                try {
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix 
+                                  << " Sending SessionCloseRequest (leadership_term_id=" 
+                                  << leadership_term_id_ << ", session_id=" << session_id_ << ")"
+                                  << std::endl;
+                    }
+                    
+                    std::vector<std::uint8_t> close_request = 
+                        SBEEncoder::encode_session_close_request(leadership_term_id_, session_id_);
+                    
+                    // Try to send with retries (similar to how keepalive is sent)
+                    int attempts = 3;
+                    while (attempts > 0) {
+                        if (send_raw_message(close_request)) {
+                            if (config_.debug_logging) {
+                                std::cout << config_.logging.log_prefix 
+                                          << " SessionCloseRequest sent successfully" << std::endl;
+                            }
+                            break;
+                        }
+                        attempts--;
+                        if (attempts > 0) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                    }
+                    
+                    if (attempts == 0) {
+                        if (config_.enable_console_errors || config_.debug_logging) {
+                            std::cerr << config_.logging.log_prefix 
+                                      << " WARNING: Failed to send SessionCloseRequest after 3 attempts "
+                                      << "(session_id=" << session_id_ << ", leadership_term=" << leadership_term_id_ 
+                                      << ", publication_connected=" << publication_connected << ")"
+                                      << std::endl;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    if (config_.enable_console_errors) {
+                        std::cerr << config_.logging.log_prefix 
+                                  << " ERROR sending SessionCloseRequest: " << e.what() << std::endl;
+                    }
                 }
             }
+        } else if (should_send_close && config_.enable_console_errors) {
+            std::cerr << config_.logging.log_prefix 
+                      << " WARNING: Cannot send SessionCloseRequest - no publication or publication not connected"
+                      << " (session_id=" << session_id_ << ", leadership_term=" << leadership_term_id_ << ")"
+                      << std::endl;
         }
 
+        // Reset connection state AFTER attempting to send close request
         ingress_publication_.reset();
         connected_ = false;
         session_id_ = -1;
@@ -349,17 +429,34 @@ class SessionManager::Impl {
         }
 
         try {
-            std::vector<std::uint8_t> encoded_message =
-                SBEEncoder::encode_session_keep_alive(leadership_term_id_, session_id_);
+            // Use pre-built buffer like Go version (matches Go SendKeepAlive implementation)
+            // Retry up to 3 times with idle strategy between attempts (like Go)
+            for (int i = 0; i < 3; i++) {
+                aeron::AtomicBuffer buffer(
+                    reinterpret_cast<std::uint8_t*>(keepalive_buffer_.data()),
+                    static_cast<aeron::util::index_t>(keepalive_buffer_.size()));
 
-            if (send_raw_message(encoded_message)) {
-                stats_.keepalives_sent++;
-                stats_.last_keepalive_time = std::chrono::steady_clock::now();
-                return true;
-            } else {
-                stats_.keepalives_failed++;
-                return false;
+                std::int64_t result = ingress_publication_->offer(buffer, 0, keepalive_buffer_.size());
+
+                if (result > 0) {
+                    stats_.keepalives_sent++;
+                    stats_.last_keepalive_time = std::chrono::steady_clock::now();
+                    return true;
+                }
+
+                // If failed due to back pressure, use idle strategy (like Go)
+                if (i < 2) {  // Don't sleep on last attempt
+                    std::this_thread::sleep_for(std::chrono::microseconds(1));
+                }
             }
+
+            // All retries failed
+            stats_.keepalives_failed++;
+            if (config_.debug_logging) {
+                std::cout << config_.logging.log_prefix
+                          << " Keepalive send failed after 3 attempts" << std::endl;
+            }
+            return false;
 
         } catch (const std::exception& e) {
             stats_.keepalives_failed++;
@@ -444,29 +541,81 @@ class SessionManager::Impl {
     SessionEventCallback session_event_callback_;
     ConnectionStateCallback connection_state_callback_;
     std::vector<std::uint8_t> session_header_buffer_;  // Pre-built like Go client
+    std::vector<std::uint8_t> keepalive_buffer_;  // Pre-built keepalive buffer like Go keepAliveBuffer
 
     // ---- Connection management methods ----
 
+    // Resolve endpoint string for a given member id.
+    // Supports two formats in config_.cluster_endpoints:
+    // 1) Indexed list: ["hostA:9002","hostB:9002","hostC:9002"] (index == memberId)
+    // 2) Explicit map entries: ["0=hostA:9002","2=hostC:9002", ...] (id=endpoint)
+    std::string resolve_endpoint_for_member(int member_id) {
+        // First pass: check for explicit id mapping entries
+        for (const auto &entry : config_.cluster_endpoints) {
+            auto pos = entry.find('=');
+            if (pos != std::string::npos) {
+                // Format id=endpoint
+                const std::string id_str = entry.substr(0, pos);
+                const std::string endpoint_str = entry.substr(pos + 1);
+                try {
+                    int id = std::stoi(id_str);
+                    if (id == member_id) {
+                        if (config_.enable_console_info || config_.debug_logging) {
+                            std::cout << config_.logging.log_prefix
+                                      << " Resolved endpoint via explicit mapping for member "
+                                      << member_id << ": " << endpoint_str << std::endl;
+                        }
+                        return endpoint_str;
+                    }
+                } catch (...) {
+                    // Ignore malformed mapping and continue
+                }
+            }
+        }
+
+        // Fallback: index-based resolution
+        if (member_id >= 0 && member_id < static_cast<int>(config_.cluster_endpoints.size())) {
+            const std::string &endpoint = config_.cluster_endpoints[member_id];
+            // If this entry itself is a mapping, skip (not matching id)
+            if (endpoint.find('=') == std::string::npos) {
+                return endpoint;
+            }
+        }
+        return std::string();
+    }
+
     bool try_connect_to_member(int member_id) {
-        if (member_id >= static_cast<int>(config_.cluster_endpoints.size())) {
+        std::string endpoint = resolve_endpoint_for_member(member_id);
+        if (endpoint.empty()) {
+            if (config_.enable_console_warnings) {
+                std::cout << config_.logging.log_prefix
+                          << " Unable to resolve endpoint for member " << member_id << std::endl;
+            }
             return false;
         }
 
-        std::string endpoint = config_.cluster_endpoints[member_id];
-
-        if (config_.debug_logging) {
+        if (config_.enable_console_info || config_.debug_logging) {
             std::cout << config_.logging.log_prefix << " Attempting connection to member "
                       << member_id << ": " << endpoint << std::endl;
         }
 
         try {
+            // Ensure any previous publication is closed before switching members
+            if (ingress_publication_) {
+                try {
+                    ingress_publication_->close();
+                } catch (...) {
+                    // ignore close errors
+                }
+                ingress_publication_.reset();
+            }
             // Create ingress publication
             std::string ingress_channel = "aeron:udp?endpoint=" + endpoint;
             std::int64_t pub_id =
                 aeron_->addExclusivePublication(ingress_channel, config_.ingress_stream_id);
 
-            // Wait for publication to connect
-            auto timeout = std::chrono::seconds(5);
+            // Wait for publication to connect (longer timeout for ELB endpoints)
+            auto timeout = std::chrono::seconds(10);
             auto start_time = std::chrono::steady_clock::now();
 
             while ((std::chrono::steady_clock::now() - start_time) < timeout) {
@@ -478,11 +627,26 @@ class SessionManager::Impl {
             }
 
             if (!ingress_publication_ || !ingress_publication_->isConnected()) {
+                if (config_.enable_console_warnings) {
+                    std::cout << config_.logging.log_prefix
+                              << " Ingress publication failed to connect to member "
+                              << member_id << " (" << endpoint << ") after "
+                              << std::chrono::duration_cast<std::chrono::seconds>(timeout).count()
+                              << " seconds" << std::endl;
+                }
                 return false;
             }
 
-            // Send SessionConnectRequest
-            if (!send_session_connect_request()) {
+            // Send SessionConnectRequest (with retries on back pressure)
+            int connect_offer_retries = 20;
+            while (connect_offer_retries-- > 0) {
+                if (send_session_connect_request()) {
+                    break;
+                }
+                // If failed due to back pressure, brief backoff and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (connect_offer_retries < 0) {
                 return false;
             }
 
@@ -501,7 +665,7 @@ class SessionManager::Impl {
                 // Check if we got redirected - if so, return false to let connect() handle the redirect
                 int redirect_target = redirected_to_member_id_.load();
                 if (redirect_target >= 0 && redirect_target != member_id) {
-                    if (config_.debug_logging) {
+                    if (config_.enable_console_info || config_.debug_logging) {
                         std::cout << config_.logging.log_prefix 
                                   << " Got redirect to member " << redirect_target
                                   << " while connecting to member " << member_id << std::endl;
@@ -594,6 +758,52 @@ class SessionManager::Impl {
         if (config_.debug_logging) {
             std::cout << config_.logging.log_prefix
                       << " Created session header buffer (32 bytes) with FIXED block_length=24"
+                      << std::endl;
+        }
+    }
+
+    void create_keepalive_buffer() {
+        // Create exactly like Go client: 8 bytes header + 16 bytes data = 24 bytes total
+        keepalive_buffer_.resize(24);
+
+        size_t offset = 0;
+
+        // SBE Header (8 bytes) - matching Go MakeClusterMessageBuffer
+        write_uint16_le(keepalive_buffer_, offset, 16);  // block_length = 16
+        offset += 2;
+        write_uint16_le(keepalive_buffer_, offset, SBEConstants::SESSION_KEEPALIVE_TEMPLATE_ID);  // template ID = 5
+        offset += 2;
+        write_uint16_le(keepalive_buffer_, offset, SBEConstants::CLUSTER_SCHEMA_ID);  // schema ID = 111
+        offset += 2;
+        write_uint16_le(keepalive_buffer_, offset, SBEConstants::CLUSTER_SCHEMA_VERSION);  // schema version = 8
+        offset += 2;
+
+        // Fixed Block (16 bytes) - will be updated in update_keepalive_buffer()
+        write_int64_le(keepalive_buffer_, offset, 0);  // leadership_term_id (updated later)
+        offset += 8;
+        write_int64_le(keepalive_buffer_, offset, 0);  // cluster_session_id (updated later)
+        offset += 8;
+
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix
+                      << " Created keepalive buffer (24 bytes) with block_length=16"
+                      << std::endl;
+        }
+    }
+
+    void update_keepalive_buffer() {
+        // Update the pre-built buffer with current session values (like Go does)
+        size_t offset = 8;  // Skip SBE header, go to fixed block
+
+        write_int64_le(keepalive_buffer_, offset, leadership_term_id_);
+        offset += 8;
+        write_int64_le(keepalive_buffer_, offset, session_id_);
+
+        if (config_.debug_logging) {
+            std::cout << config_.logging.log_prefix << " Updated keepalive buffer with:" << std::endl;
+            std::cout << config_.logging.log_prefix << "   Leadership term: " << leadership_term_id_
+                      << std::endl;
+            std::cout << config_.logging.log_prefix << "   Session ID: " << session_id_
                       << std::endl;
         }
     }
@@ -735,13 +945,15 @@ class SessionManager::Impl {
                     }
                     std::cout << std::dec << std::endl;
 
-                    // Verify this matches the expected TopicMessage header (08 00 01 00 01 00 01
-                    // 00)
+                    // Verify this matches the expected TopicMessage header
+                    // Old format: block_length=8 (08 00), new format: block_length=16 (10 00)
+                    // Both are valid, just check template_id=1, schema_id=1, version=1
+                    uint16_t block_length = combined_buffer[32] | (combined_buffer[33] << 8);
                     bool header_correct =
-                        (combined_buffer[32] == 0x08 && combined_buffer[33] == 0x00 &&
-                         combined_buffer[34] == 0x01 && combined_buffer[35] == 0x00 &&
-                         combined_buffer[36] == 0x01 && combined_buffer[37] == 0x00 &&
-                         combined_buffer[38] == 0x01 && combined_buffer[39] == 0x00);
+                        (block_length == 8 || block_length == 16) && // Support both old and new format
+                        (combined_buffer[34] == 0x01 && combined_buffer[35] == 0x00 && // template_id = 1
+                         combined_buffer[36] == 0x01 && combined_buffer[37] == 0x00 && // schema_id = 1
+                         combined_buffer[38] == 0x01 && combined_buffer[39] == 0x00);  // version = 1
                     std::cout << config_.logging.log_prefix
                               << "   Business header valid: " << (header_correct ? "YES" : "NO")
                               << std::endl;
@@ -804,6 +1016,7 @@ class SessionManager::Impl {
         leader_member_id_ = result.leader_member_id;
 
         update_session_header();
+        update_keepalive_buffer();  // Update keepalive buffer with session values (like Go)
         stats_.session_start_time = std::chrono::steady_clock::now();
 
         if (config_.enable_console_info) {

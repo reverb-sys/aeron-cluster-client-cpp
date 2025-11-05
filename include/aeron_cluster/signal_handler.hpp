@@ -66,6 +66,8 @@ private:
     
     /**
      * @brief Disconnect all registered clients
+     * 
+     * Internal method called by signal handler.
      */
     void disconnect_all_clients();
     

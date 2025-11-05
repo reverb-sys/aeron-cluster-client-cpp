@@ -1,5 +1,6 @@
 #include <aeron_cluster/cluster_client.hpp>
 #include <aeron_cluster/logging.hpp>
+#include <aeron_cluster/signal_handler.hpp>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -44,10 +45,12 @@ std::map<std::string, int> messages_published_by_identifier;
 std::map<std::string, int> messages_received_by_identifier;
 std::mutex identifier_mutex;
 
-void signalHandler(int signal) {
-    logger->info("Received signal {}, shutting down gracefully...", signal);
-    running = false;
-}
+// Signal handling is completely automatic via SignalHandlerManager.
+// When clients connect(), they automatically register with SignalHandlerManager.
+// SignalHandlerManager installs signal handlers for SIGINT and SIGTERM that:
+// 1. Disconnect all registered clients (sending SessionCloseRequest for each)
+// 2. Re-raise the signal to allow normal termination
+// No manual signal handling needed - it's all automatic!
 
 void printMessageComparison() {
     std::lock_guard<std::mutex> lock(comparison_mutex);
@@ -234,7 +237,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
-                std::string actualMessageId = publisher->publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
+                std::string actualMessageId = publisher->publish_message_to_topic(messageType, payload, headers, "order_request_topic");
                 
                 messages_published++;
                 
@@ -245,7 +248,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 }
                 
                 pub_logger->info("Published message {}/{}: {} with identifier ROHIT_AERON01_TX (ID: {}...)", 
-                              messages_published.load(), messageCount, side, actualMessageId.substr(0, 12));
+                              messages_published.load(), messageCount, side, actualMessageId);
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -568,7 +571,7 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
-                std::string actualMessageId = publisher.publish_message_to_topic(messageType, payload, headers, "order_notification_topic");
+                std::string actualMessageId = publisher.publish_message_to_topic(messageType, payload, headers, "order_request_topic");
                 
                 messages_published++;
                 
@@ -585,7 +588,7 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 }
                 
                 pub_logger->info("Published message {}/{}: {} with identifier {} (ID: {}...)", 
-                              messages_published.load(), messageCount, side, identifier, actualMessageId.substr(0, 12));
+                              messages_published.load(), messageCount, side, identifier, actualMessageId);
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -887,7 +890,7 @@ int main(int argc, char* argv[]) {
     int messageInterval = 100;  // milliseconds
     int disconnectAt = 30;
     int reconnectDelay = 2000;  // milliseconds
-    int timeoutMs = 5000;  // milliseconds
+    int timeoutMs = 500000;  // milliseconds
     
     // Multi-identifier test options
     std::string subscribeToIdentifier = "IDENTIFIER_A";
@@ -928,10 +931,10 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Setup signal handlers
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-    std::signal(SIGHUP, signalHandler);
+    // NOTE: Signal handlers are automatically installed by SignalHandlerManager
+    // when clients register (on connect()). No manual signal handler installation needed.
+    // SignalHandlerManager will handle SIGINT and SIGTERM automatically to gracefully
+    // disconnect all registered clients.
     
     // Validate test mode
     if (testMode != "reconnect" && testMode != "identifier-filter") {

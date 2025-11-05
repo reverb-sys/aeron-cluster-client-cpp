@@ -152,6 +152,7 @@ std::vector<uint8_t> SBEEncoder::encode_topic_message(
 
     // Set fields
     topicMessage.timestamp(static_cast<uint64_t>(timestamp));
+    topicMessage.sequenceNumber(0); // Will be set by server, client sends 0
     topicMessage.putTopic(topic);
     topicMessage.putMessageType(messageType);
     topicMessage.putUuid(uuid);
@@ -1006,6 +1007,7 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         std::string messageType = topicMessage.getMessageTypeAsString();
         std::string uuid = topicMessage.getUuidAsString();
         std::string payload = topicMessage.getPayloadAsString();
+        uint64_t sequence_number = topicMessage.sequenceNumber();
 
 
         DEBUG_LOG("[DEBUG] after wrapForDecode");        // print the topic message
@@ -1026,9 +1028,101 @@ ParseResult MessageParser::decode_topic_message_with_sbe(const uint8_t* data, si
         result.payload = payload;
         result.timestamp = static_cast<int64_t>(timestamp);
         
-        // Generate sequence number based on timestamp (nanoseconds since epoch)
-        // This provides a unique, monotonically increasing sequence
-        result.sequence_number = static_cast<std::uint64_t>(timestamp);
+        // CRITICAL FIX: Extract server sequence number from message payload JSON
+        // The server stores _sequence_number in the message payload for proper ordering
+        // Check multiple possible locations due to nested JSON structures
+        result.sequence_number = 0;  // Default to 0 if not found
+        try {
+            if (!payload.empty()) {
+                Json::Value payloadJson;
+                Json::CharReaderBuilder builder;
+                std::string errors;
+                std::istringstream payloadStream(payload);
+                
+                if (Json::parseFromStream(builder, payloadStream, &payloadJson, &errors)) {
+                    // Helper lambda to extract sequence number from a JSON value
+                    auto extractSequence = [](const Json::Value& obj) -> std::uint64_t {
+                        if (!obj.isObject()) return 0;
+                        if (obj.isMember("_sequence_number")) {
+                            Json::Value seqValue = obj["_sequence_number"];
+                            if (seqValue.isUInt64()) {
+                                return seqValue.asUInt64();
+                            } else if (seqValue.isInt64()) {
+                                return static_cast<std::uint64_t>(seqValue.asInt64());
+                            } else if (seqValue.isNumeric()) {
+                                return static_cast<std::uint64_t>(seqValue.asDouble());
+                            } else if (seqValue.isString()) {
+                                try {
+                                    return static_cast<std::uint64_t>(std::stoull(seqValue.asString()));
+                                } catch (...) {
+                                    return 0;
+                                }
+                            }
+                        }
+                        return 0;
+                    };
+                    
+                    // Try multiple possible locations for _sequence_number:
+                    // 1. Top level: payload._sequence_number
+                    if (payloadJson.isMember("_sequence_number")) {
+                        std::uint64_t seq = extractSequence(payloadJson);
+                        if (seq > 0) {
+                            result.sequence_number = seq;
+                            DEBUG_LOG("[DEBUG] Found sequence_number at top level: ", seq);
+                        }
+                    }
+                    
+                    // 2. First level nested: payload.message._sequence_number
+                    if (result.sequence_number == 0 && payloadJson.isMember("message") && payloadJson["message"].isObject()) {
+                        std::uint64_t seq = extractSequence(payloadJson["message"]);
+                        if (seq > 0) {
+                            result.sequence_number = seq;
+                            DEBUG_LOG("[DEBUG] Found sequence_number in message object: ", seq);
+                        }
+                    }
+                    
+                    // 3. Second level nested: payload.message.message._sequence_number
+                    if (result.sequence_number == 0 && payloadJson.isMember("message") && payloadJson["message"].isObject()) {
+                        Json::Value messageObj = payloadJson["message"];
+                        if (messageObj.isMember("message") && messageObj["message"].isObject()) {
+                            std::uint64_t seq = extractSequence(messageObj["message"]);
+                            if (seq > 0) {
+                                result.sequence_number = seq;
+                                DEBUG_LOG("[DEBUG] Found sequence_number in nested message.message object: ", seq);
+                            }
+                        }
+                    }
+                    
+                    // 4. Check for nested structure: payload.message.message.message._sequence_number (very deep)
+                    if (result.sequence_number == 0 && payloadJson.isMember("message") && payloadJson["message"].isObject()) {
+                        Json::Value messageObj = payloadJson["message"];
+                        if (messageObj.isMember("message") && messageObj["message"].isObject()) {
+                            Json::Value innerMessageObj = messageObj["message"];
+                            if (innerMessageObj.isMember("message") && innerMessageObj["message"].isObject()) {
+                                std::uint64_t seq = extractSequence(innerMessageObj["message"]);
+                                if (seq > 0) {
+                                    result.sequence_number = seq;
+                                    DEBUG_LOG("[DEBUG] Found sequence_number in deeply nested message structure: ", seq);
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (result.sequence_number == 0) {
+                        DEBUG_LOG("[DEBUG] Could not find _sequence_number in payload, defaulting to 0");
+                        DEBUG_LOG("[DEBUG] Payload structure (first 500 chars): ", payload.substr(0, 500));
+                    } else {
+                        DEBUG_LOG("[DEBUG] Successfully extracted sequence_number: ", result.sequence_number);
+                    }
+                } else {
+                    DEBUG_LOG("[DEBUG] Failed to parse JSON payload for sequence number extraction: ", errors);
+                }
+            }
+        } catch (const std::exception& e) {
+            DEBUG_LOG("[DEBUG] Failed to extract sequence number from payload: ", e.what());
+            // If extraction fails, use 0 - server will extract it from stored message
+            result.sequence_number = 0;
+        }
 
         // Try to decode headers separately to avoid affecting the main result
         try {

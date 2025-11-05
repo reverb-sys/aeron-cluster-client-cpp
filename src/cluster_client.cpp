@@ -179,29 +179,39 @@ class ClusterClient::Impl {
     }
 
     void disconnect() {
-        if (connection_state_ == ConnectionState::DISCONNECTED) {
-            return;
+        // CRITICAL FIX: Always try to send close request, even if already disconnected
+        // This ensures the server is notified when signal handler calls disconnect()
+        bool was_connected = (connection_state_ == ConnectionState::CONNECTED);
+        
+        if (was_connected) {
+            DEBUG_LOG("Disconnecting client...");
+        } else {
+            DEBUG_LOG("Disconnect called but client already disconnected, will still attempt to send close request");
         }
-
-        DEBUG_LOG("Disconnecting client...");
         
-        // Stop polling first to prevent interference with cleanup
-        stop_polling();
-        
-        set_connection_state(ConnectionState::DISCONNECTED);
-
+        // CRITICAL FIX: Send SessionCloseRequest BEFORE stopping polling and resetting resources
+        // This ensures the server is notified of the disconnection
         if (session_manager_) {
+            // Always try to disconnect session manager (it will send close request if connected)
             session_manager_->disconnect();
         }
 
-        egress_subscription_.reset();
-        aeron_.reset();
+        // Only do cleanup if we were actually connected
+        if (was_connected) {
+            // Stop polling first to prevent interference with cleanup
+            stop_polling();
+            
+            set_connection_state(ConnectionState::DISCONNECTED);
 
-        stats_.current_session_id = -1;
-        stats_.current_leader_id = -1;
-        stats_.is_connected = false;
+            egress_subscription_.reset();
+            aeron_.reset();
+
+            stats_.current_session_id = -1;
+            stats_.current_leader_id = -1;
+            stats_.is_connected = false;
+        }
         
-        DEBUG_LOG("Client disconnected successfully");
+        DEBUG_LOG("Client disconnect completed (was_connected={})", was_connected);
     }
 
     bool is_connected() const {
@@ -977,7 +987,7 @@ class ClusterClient::Impl {
             
             if (config_.debug_logging) {
                 std::cout << "Received message: " << result.message_type << " " << result.message_id << " " << result.error_message
-                          << " - " << result.headers << " - " << result.payload
+                          << " - " << result.headers << " - " << result.payload << " - " << result.sequence_number
                           << std::endl;
             }
             
@@ -1146,7 +1156,7 @@ class ClusterClient::Impl {
                 if (connection_state_ == ConnectionState::CONNECTED && is_in_grace_period) {
                     // Check if this is a fresh connection (session manager just connected)
                     if (session_manager_ && session_manager_->is_connected()) {
-                        DEBUG_LOG("Fresh connection detected, extending grace period");
+                        // DEBUG_LOG("Fresh connection detected, extending grace period");
                         connection_start_time = now; // Reset grace period
                         is_in_grace_period = true;
                     }
@@ -1227,6 +1237,8 @@ ClusterClient::ClusterClient(const ClusterClientConfig& config)
 
 ClusterClient::~ClusterClient() {
     // Unregister this client from signal handling
+    std::cout << "[ClusterClient] Destructor called, unregistering client from signal handling (session_id=" 
+              << pImpl_->get_session_id() << ")" << std::endl;
     SignalHandlerManager::instance().unregister_client(this);
 }
 
@@ -1249,14 +1261,20 @@ bool ClusterClient::connect_with_timeout(std::chrono::milliseconds timeout) {
 }
 
 void ClusterClient::enable_automatic_signal_handling() {
+    std::cout << "Enabling automatic signal handling" << std::endl;
     // Register this client for automatic signal handling
     // shared_from_this() throws std::bad_weak_ptr if not owned by std::shared_ptr
     try {
         auto self = shared_from_this();
         SignalHandlerManager::instance().register_client(self);
+        std::cout << "[SignalHandler] Successfully registered client for automatic signal handling" << std::endl;
     } catch (const std::bad_weak_ptr&) {
+        std::cerr << "[SignalHandler] ERROR: Client not managed by std::shared_ptr! Cannot register for automatic signal handling." << std::endl;
+        std::cerr << "[SignalHandler] Make sure to create clients with std::make_shared<ClusterClient>(...)" << std::endl;
         // Client not managed by std::shared_ptr; skip auto signal handling
         // Users can still register manually by creating the client in a shared_ptr
+    } catch (const std::exception& e) {
+        std::cerr << "[SignalHandler] ERROR: Exception while registering client: " << e.what() << std::endl;
     }
 }
 
@@ -1406,6 +1424,7 @@ std::string ClusterClient::publish_topic(std::string_view topic, std::string_vie
 
     const auto ts = now_nanos();
     msg.timestamp(ts);
+    msg.sequenceNumber(0); // Will be set by server, client sends 0
 
     // IMPORTANT: pass 'int' lengths; the codegen writes uint16 under the hood.
     msg.putTopic(topic.data(), static_cast<int>(topic.size()));

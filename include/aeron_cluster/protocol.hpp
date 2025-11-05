@@ -9,7 +9,7 @@ constexpr std::uint16_t TOPIC_MESSAGE_TEMPLATE_ID  = 1; // TopicMessage
 constexpr std::uint16_t ACKNOWLEDGMENT_TEMPLATE_ID = 2; // Acknowledgment
 constexpr std::uint16_t SBE_SCHEMA_ID              = 1;
 constexpr std::uint16_t SBE_VERSION                = 1;
-constexpr std::uint16_t TOPIC_MESSAGE_BLOCK_LENGTH = 8; // matches TopicMessage block length
+constexpr std::uint16_t TOPIC_MESSAGE_BLOCK_LENGTH = 16; // New format: timestamp (8) + sequenceNumber (8) = 16
 
 // Control topics
 inline constexpr const char* TOPIC_SUBSCRIPTIONS = "_subscriptions";
