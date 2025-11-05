@@ -55,7 +55,7 @@ std::vector<std::uint8_t> CommitManager::build_commit_message(const std::string&
 
     // Prepare buffer (oversized to avoid reallocs)
     std::vector<std::uint8_t> buf;
-    buf.resize(8 /*header*/ + 8 /*timestamp*/ + 512);
+    buf.resize(8 /*header*/ + 16 /*timestamp + sequenceNumber*/ + 512);
 
     // Encode header
     sbe::MessageHeader hdr;
@@ -70,6 +70,7 @@ std::vector<std::uint8_t> CommitManager::build_commit_message(const std::string&
     msg.wrapForEncode(reinterpret_cast<char*>(buf.data()), 8, static_cast<std::uint64_t>(buf.size() - 8));
 
     msg.timestamp(now_nanos());
+    msg.sequenceNumber(0); // Will be set by server, client sends 0
 
     msg.putTopic(TOPIC_SUBSCRIPTIONS, static_cast<std::uint16_t>(std::char_traits<char>::length(TOPIC_SUBSCRIPTIONS)));
     msg.putMessageType(MSGTYPE_COMMIT, static_cast<std::uint16_t>(std::char_traits<char>::length(MSGTYPE_COMMIT)));
@@ -111,7 +112,7 @@ std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::
 
     // Prepare buffer (oversized to avoid reallocs)
     std::vector<std::uint8_t> buf;
-    buf.resize(8 /*header*/ + 8 /*timestamp*/ + 1024);
+    buf.resize(8 /*header*/ + 16 /*timestamp + sequenceNumber*/ + 1024);
 
     // Encode header
     sbe::MessageHeader hdr;
@@ -126,6 +127,7 @@ std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::
     msg.wrapForEncode(reinterpret_cast<char*>(buf.data()), 8, static_cast<std::uint64_t>(buf.size() - 8));
 
     msg.timestamp(now_nanos());
+    msg.sequenceNumber(0); // Will be set by server, client sends 0
 
     // Use the same approach as Go client: send to _subscriptions topic with COMMIT_OFFSET message type
     msg.putTopic(TOPIC_SUBSCRIPTIONS, static_cast<std::uint16_t>(std::char_traits<char>::length(TOPIC_SUBSCRIPTIONS)));

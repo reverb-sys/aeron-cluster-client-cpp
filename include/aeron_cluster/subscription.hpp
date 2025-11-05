@@ -27,7 +27,7 @@ build_subscription_message(std::string_view target_topic, std::string_view clien
 
     // Prepare buffer (oversized to avoid reallocs)
     std::vector<std::uint8_t> buf;
-    buf.resize(8 /*header*/ + 8 /*timestamp*/ + 512);
+    buf.resize(8 /*header*/ + 16 /*timestamp + sequenceNumber*/ + 512);
 
     // Encode header
     sbe::MessageHeader hdr;
@@ -42,6 +42,7 @@ build_subscription_message(std::string_view target_topic, std::string_view clien
     msg.wrapForEncode(reinterpret_cast<char*>(buf.data()), 8, static_cast<std::uint64_t>(buf.size() - 8));
 
     msg.timestamp(now_nanos());
+    msg.sequenceNumber(0); // Will be set by server, client sends 0
 
     msg.putTopic(TOPIC_SUBSCRIPTIONS, static_cast<std::uint16_t>(std::char_traits<char>::length(TOPIC_SUBSCRIPTIONS)));
     msg.putMessageType(MSGTYPE_SUBSCRIPTION, static_cast<std::uint16_t>(std::char_traits<char>::length(MSGTYPE_SUBSCRIPTION)));
@@ -73,7 +74,7 @@ build_unsubscription_message(std::string_view target_topic, std::string_view cli
 
     // Prepare buffer (oversized to avoid reallocs)
     std::vector<std::uint8_t> buf;
-    buf.resize(8 /*header*/ + 8 /*timestamp*/ + 512);
+    buf.resize(8 /*header*/ + 16 /*timestamp + sequenceNumber*/ + 512);
 
     // Encode header
     sbe::MessageHeader hdr;
@@ -88,6 +89,7 @@ build_unsubscription_message(std::string_view target_topic, std::string_view cli
     msg.wrapForEncode(reinterpret_cast<char*>(buf.data()), 8, static_cast<std::uint64_t>(buf.size() - 8));
 
     msg.timestamp(now_nanos());
+    msg.sequenceNumber(0); // Will be set by server, client sends 0
 
     msg.putTopic(TOPIC_SUBSCRIPTIONS, static_cast<std::uint16_t>(std::char_traits<char>::length(TOPIC_SUBSCRIPTIONS)));
     msg.putMessageType(MSGTYPE_UNSUBSCRIBE, static_cast<std::uint16_t>(std::char_traits<char>::length(MSGTYPE_UNSUBSCRIBE)));
