@@ -327,7 +327,8 @@ public:
         const std::string& quote_token = "USDC",
         const std::string& side = "BUY",
         double quantity = 1.0,
-        double limit_price = 3500.0);
+        double limit_price = 3500.0,
+        const std::string& identifier = "ROHIT_AERON01_TX");
 
     /**
      * @brief Create a sample market order for testing

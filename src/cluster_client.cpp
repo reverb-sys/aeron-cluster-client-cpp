@@ -1,9 +1,11 @@
 #include "aeron_cluster/cluster_client.hpp"
 #include "aeron_cluster/performance_config.hpp"
+#include "aeron_cluster/logging.hpp"
 #include <Aeron.h>
 #include <json/json.h>
 
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <iostream>
@@ -87,6 +89,7 @@ class ClusterClient::Impl {
     explicit Impl(const ClusterClientConfig& config)
         : config_(config),
           session_manager_(std::make_unique<SessionManager>(config)),
+          logger_(LoggerFactory::instance().getLogger("cluster_client")),
           commit_manager_(std::make_unique<CommitManager>()),
           connection_state_(ConnectionState::DISCONNECTED),
           auto_reconnect_enabled_(false) {
@@ -94,12 +97,21 @@ class ClusterClient::Impl {
         if (config_.instance_identifier.empty()) {
             config_.instance_identifier = generate_instance_identifier();
         }
+
+        session_manager_->set_session_event_callback(
+            [this](const ParseResult& event) { this->on_session_event(event); });
+
+        session_manager_->set_connection_state_callback(
+            [this](bool connected) { this->on_session_connection_state_changed(connected); });
     }
 
     ~Impl() {
         try {
             stop_polling();
             disconnect();
+            if (auto_reconnect_thread_.joinable()) {
+                auto_reconnect_thread_.join();
+            }
         } catch (const std::exception& e) {
             DEBUG_LOG("Error in destructor: ", e.what());
         }
@@ -159,6 +171,8 @@ class ClusterClient::Impl {
             stats_.current_leader_id = result.leader_member_id;
             stats_.connection_established_time = std::chrono::steady_clock::now();
             stats_.is_connected = true;
+            disconnect_notified_.store(false);
+            reconnect_in_progress_.store(false);
 
             // Resume from last commit for subscribed topics
             resume_subscribed_topics();
@@ -182,6 +196,11 @@ class ClusterClient::Impl {
         // CRITICAL FIX: Always try to send close request, even if already disconnected
         // This ensures the server is notified when signal handler calls disconnect()
         bool was_connected = (connection_state_ == ConnectionState::CONNECTED);
+        suppress_disconnect_notifications_.store(true);
+        struct NotificationReset {
+            std::atomic<bool>& flag;
+            ~NotificationReset() { flag.store(false); }
+        } reset_guard{suppress_disconnect_notifications_};
         
         if (was_connected) {
             DEBUG_LOG("Disconnecting client...");
@@ -420,9 +439,7 @@ class ClusterClient::Impl {
         
         std::string payload_json = Json::writeString(builder, payload);
         if (config_.debug_logging) {
-            std::cout << config_.logging.log_prefix
-                      << " Sending subscription request for topic: " << topic
-                      << " (MessageID: " << message_id << ", InstanceID: " << effective_instance_id << ")" << std::endl;
+            logger_->debug("Sending subscription request for topic: ", topic, " (MessageID: ", message_id, ", InstanceID: ", effective_instance_id, ")");
         }
 
         if (!session_manager_->publish_message("_subscriptions", message_type, message_id,
@@ -477,12 +494,8 @@ class ClusterClient::Impl {
     }
 
     void stop_polling() {
-        if (!polling_active_) {
-            return;
-        }
-
-        polling_active_ = false;
-        if (polling_thread_.joinable()) {
+        polling_active_.store(false);
+        if (polling_thread_.joinable() && polling_thread_.get_id() != std::this_thread::get_id()) {
             polling_thread_.join();
         }
     }
@@ -560,9 +573,7 @@ class ClusterClient::Impl {
         std::string payload_json = Json::writeString(builder, payload);
         
         if (config_.debug_logging) {
-            std::cout << config_.logging.log_prefix
-                      << " Sending unsubscription request for topic: " << topic
-                      << " (MessageID: " << message_id << ")" << std::endl;
+            logger_->debug("Sending unsubscription request for topic: ", topic, " (MessageID: ", message_id, ")");
         }
 
         if (!session_manager_->publish_message("_subscriptions", message_type, message_id,
@@ -753,10 +764,10 @@ class ClusterClient::Impl {
                 std::lock_guard<std::mutex> lock(subscription_mutex_);
                 auto it = subscription_message_identifiers_.find(topic);
                 if (it != subscription_message_identifiers_.end()) {
-                    std::cout << "[DEBUG] Using stored message identifier for topic " << topic << ": " << it->second << std::endl;
+                    logger_->debug("Using stored message identifier for topic ", topic, ": ", it->second);
                     return it->second;
                 } else {
-                    std::cout << "[DEBUG] No stored message identifier found for topic: " << topic << ", using default: " << config_.client_id << std::endl;
+                    logger_->debug("No stored message identifier found for topic: ", topic, ", using default: ", config_.client_id);
                 }
             }
             return config_.client_id;
@@ -903,6 +914,7 @@ class ClusterClient::Impl {
    private:
     ClusterClientConfig config_;
     std::unique_ptr<SessionManager> session_manager_;
+    std::shared_ptr<Logger> logger_;
     std::shared_ptr<aeron::Aeron> aeron_;
     std::shared_ptr<aeron::Subscription> egress_subscription_;
     std::unique_ptr<CommitManager> commit_manager_;
@@ -910,6 +922,9 @@ class ClusterClient::Impl {
     std::atomic<ConnectionState> connection_state_;
     ConnectionStats stats_;
     bool auto_reconnect_enabled_;
+    std::atomic<bool> reconnect_in_progress_{false};
+    std::atomic<bool> disconnect_notified_{false};
+    std::atomic<bool> suppress_disconnect_notifications_{false};
 
     // Callbacks
     MessageCallback message_callback_;
@@ -919,6 +934,7 @@ class ClusterClient::Impl {
     // Polling
     std::atomic<bool> polling_active_{false};
     std::thread polling_thread_;
+    std::thread auto_reconnect_thread_;
 
     std::unique_ptr<LocalFragmentReassembler> egress_reassembler_;
     
@@ -986,9 +1002,14 @@ class ClusterClient::Impl {
             ParseResult result = MessageParser::parse_message(data, length);
             
             if (config_.debug_logging) {
-                std::cout << "Received message: " << result.message_type << " " << result.message_id << " " << result.error_message
-                          << " - " << result.headers << " - " << result.payload << " - " << result.sequence_number
-                          << std::endl;
+                logger_->info(
+                    "Received message: {} {} {} - {} - {} - {}",
+                    result.message_type,
+                    result.message_id,
+                    result.error_message,
+                    result.headers,
+                    result.payload,
+                    result.sequence_number);
             }
             
             if (result.success) {
@@ -1000,14 +1021,12 @@ class ClusterClient::Impl {
                 // Check for message deduplication
                 if (!result.message_id.empty() && is_message_processed(result.message_id)) {
                     // Message already processed, skip
-                    return;
+                    logger_->debug("Message already processed, skipping: ", result.message_id);
+                    // return;
                 }
 
                 // Basic debug output to see if we reach this point
-                std::cout << "[DEBUG] Processing message: " << result.message_id 
-                          << " type: " << result.message_type 
-                          << " payload length: " << result.payload.length() << std::endl;
-
+                logger_->debug("Processing message: ", result.message_id, " type: ", result.message_type, " payload length: ", result.payload.length());
                 // Check if message should be filtered out from auto-commit
                 bool should_skip = should_skip_auto_commit(result);
                 
@@ -1100,6 +1119,163 @@ class ClusterClient::Impl {
         }
     }
 
+    void on_session_event(const ParseResult& event) {
+        if (config_.debug_logging) {
+            DEBUG_LOG("Session event received: code=", event.event_code,
+                      " message=", event.error_message,
+                      " leader=", event.leader_member_id);
+        }
+
+        switch (event.event_code) {
+            case SBEConstants::SESSION_EVENT_REDIRECT:
+                stats_.current_leader_id = event.leader_member_id;
+                break;
+            case SBEConstants::SESSION_EVENT_CLOSED: {
+                std::string reason = "Cluster session closed";
+                if (!event.error_message.empty()) {
+                    reason += ": " + event.error_message;
+                }
+                notify_connection_loss(reason);
+                break;
+            }
+            case SBEConstants::SESSION_EVENT_ERROR: {
+                std::string reason = "Cluster session error";
+                if (!event.error_message.empty()) {
+                    reason += ": " + event.error_message;
+                }
+                notify_connection_loss(reason);
+                break;
+            }
+            case SBEConstants::SESSION_EVENT_AUTHENTICATION_REJECTED: {
+                std::string reason = "Cluster session authentication rejected";
+                if (!event.error_message.empty()) {
+                    reason += ": " + event.error_message;
+                }
+                notify_connection_loss(reason, false);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    void on_session_connection_state_changed(bool connected) {
+        if (connected) {
+            stats_.is_connected = true;
+            disconnect_notified_.store(false);
+            return;
+        }
+
+        stats_.is_connected = false;
+        notify_connection_loss("Cluster session disconnected");
+    }
+
+    void notify_connection_loss(const std::string& reason, bool allow_auto_reconnect = true) {
+        if (suppress_disconnect_notifications_.load()) {
+            if (config_.debug_logging) {
+                DEBUG_LOG("Disconnect notification suppressed (reason: ", reason, ")");
+            }
+            return;
+        }
+
+        if (disconnect_notified_.exchange(true)) {
+            return;
+        }
+
+        if (config_.enable_console_info || config_.debug_logging) {
+            logger_->info("Connection lost: ", reason);
+        }
+
+        stats_.is_connected = false;
+        stats_.current_session_id = -1;
+        stats_.current_leader_id = -1;
+
+        polling_active_ = false;
+
+        set_connection_state(ConnectionState::DISCONNECTED);
+
+        if (error_callback_) {
+            error_callback_(reason);
+        }
+
+        if (allow_auto_reconnect && auto_reconnect_enabled_) {
+            schedule_auto_reconnect(reason);
+        }
+    }
+
+    void schedule_auto_reconnect(const std::string& reason) {
+        if (!auto_reconnect_enabled_) {
+            return;
+        }
+
+        if (reconnect_in_progress_.exchange(true)) {
+            if (config_.debug_logging) {
+                DEBUG_LOG("Auto-reconnect already in progress, skipping new request");
+            }
+            return;
+        }
+
+        if (auto_reconnect_thread_.joinable()) {
+            auto_reconnect_thread_.join();
+        }
+
+        auto_reconnect_thread_ = std::thread([this, reason]() {
+            // Ensure previous polling loop is stopped
+            stop_polling();
+
+            for (int attempt = 1;
+                 auto_reconnect_enabled_ && attempt <= PerformanceConfig::MAX_RECONNECT_ATTEMPTS;
+                 ++attempt) {
+                if (!auto_reconnect_enabled_) {
+                    break;
+                }
+
+                if (config_.debug_logging) {
+                    DEBUG_LOG("Auto-reconnect attempt ", attempt, " (reason: ", reason, ")");
+                }
+
+                std::this_thread::sleep_for(PerformanceConfig::RECONNECT_DELAY);
+
+                if (!auto_reconnect_enabled_) {
+                    break;
+                }
+
+                suppress_disconnect_notifications_.store(true);
+                try {
+                    if (session_manager_) {
+                        session_manager_->disconnect();
+                    }
+                } catch (const std::exception& e) {
+                    if (config_.enable_console_errors || config_.debug_logging) {
+                        DEBUG_LOG("Auto-reconnect cleanup error: ", e.what());
+                    }
+                }
+                suppress_disconnect_notifications_.store(false);
+
+                egress_subscription_.reset();
+                aeron_.reset();
+
+                if (connect()) {
+                    if (config_.debug_logging) {
+                        DEBUG_LOG("Auto-reconnect successful on attempt ", attempt);
+                    }
+                    disconnect_notified_.store(false);
+                    reconnect_in_progress_.store(false);
+                    return;
+                }
+
+                stop_polling();
+            }
+
+            reconnect_in_progress_.store(false);
+            if (auto_reconnect_enabled_ && error_callback_) {
+                error_callback_(std::string("Auto-reconnect failed after ") +
+                                std::to_string(PerformanceConfig::MAX_RECONNECT_ATTEMPTS) +
+                                " attempts. Reason: " + reason);
+            }
+        });
+    }
+
     void set_connection_state(ConnectionState new_state) {
         ConnectionState old_state = connection_state_.exchange(new_state);
         if (old_state != new_state && connection_state_callback_) {
@@ -1168,7 +1344,7 @@ class ClusterClient::Impl {
                     // Full connection check only after grace period
                     if (!is_connected() || !egress_subscription_ || egress_subscription_->imageCount() <= 0) {
                         DEBUG_LOG("Connection lost or no active images, stopping polling");
-                        set_connection_state(ConnectionState::DISCONNECTED);
+                        notify_connection_loss("Connection lost or no active images");
                         break; // Exit polling loop
                     }
                 } else {
@@ -1185,7 +1361,7 @@ class ClusterClient::Impl {
                         // Only disconnect if we're past the grace period
                         if (!is_in_grace_period) {
                             DEBUG_LOG("Connection health check failed, disconnecting");
-                            set_connection_state(ConnectionState::DISCONNECTED);
+                            notify_connection_loss("Connection health check failed");
                             break;
                         } else {
                             DEBUG_LOG("Connection health check failed during grace period, continuing...");
@@ -1201,7 +1377,7 @@ class ClusterClient::Impl {
                     // Check for idle timeout (only after grace period)
                     if (!is_in_grace_period && (now - last_activity >= max_idle_time)) {
                         DEBUG_LOG("Client idle for too long, disconnecting");
-                        set_connection_state(ConnectionState::DISCONNECTED);
+                        notify_connection_loss("Client idle for too long");
                         break;
                     }
                     std::this_thread::sleep_for(PerformanceConfig::POLL_INTERVAL);
@@ -1237,8 +1413,9 @@ ClusterClient::ClusterClient(const ClusterClientConfig& config)
 
 ClusterClient::~ClusterClient() {
     // Unregister this client from signal handling
-    std::cout << "[ClusterClient] Destructor called, unregistering client from signal handling (session_id=" 
-              << pImpl_->get_session_id() << ")" << std::endl;
+    auto logger = LoggerFactory::instance().getLogger("cluster_client");
+    logger->info("Destructor called, unregistering client from signal handling (session_id={})",
+                 pImpl_->get_session_id());
     SignalHandlerManager::instance().unregister_client(this);
 }
 
@@ -1261,16 +1438,17 @@ bool ClusterClient::connect_with_timeout(std::chrono::milliseconds timeout) {
 }
 
 void ClusterClient::enable_automatic_signal_handling() {
-    std::cout << "Enabling automatic signal handling" << std::endl;
+    auto logger = LoggerFactory::instance().getLogger("cluster_client");
+    logger->info("Enabling automatic signal handling");
     // Register this client for automatic signal handling
     // shared_from_this() throws std::bad_weak_ptr if not owned by std::shared_ptr
     try {
         auto self = shared_from_this();
         SignalHandlerManager::instance().register_client(self);
-        std::cout << "[SignalHandler] Successfully registered client for automatic signal handling" << std::endl;
+        logger->info("Successfully registered client for automatic signal handling");
     } catch (const std::bad_weak_ptr&) {
-        std::cerr << "[SignalHandler] ERROR: Client not managed by std::shared_ptr! Cannot register for automatic signal handling." << std::endl;
-        std::cerr << "[SignalHandler] Make sure to create clients with std::make_shared<ClusterClient>(...)" << std::endl;
+        logger->error("Client not managed by std::shared_ptr! Cannot register for automatic signal handling.");
+        logger->error("Make sure to create clients with std::make_shared<ClusterClient>(...)");
         // Client not managed by std::shared_ptr; skip auto signal handling
         // Users can still register manually by creating the client in a shared_ptr
     } catch (const std::exception& e) {
@@ -1537,7 +1715,8 @@ bool ClusterClient::offer_ingress(const std::uint8_t* data, std::size_t len) {
 Order ClusterClient::create_sample_limit_order(const std::string& base_token,
                                                const std::string& quote_token,
                                                const std::string& side, double quantity,
-                                               double limit_price) {
+                                               double limit_price,
+                                               const std::string& identifier) {
     // Generate unique identifiers
     std::string uuid = OrderUtils::generate_uuid();
     std::string client_order_id = uuid;
@@ -1549,7 +1728,7 @@ Order ClusterClient::create_sample_limit_order(const std::string& base_token,
     std::string create_ts = std::to_string(timestamp_ms);
 
     // Create order with new structure
-    Order order(base_token, quote_token, side, quantity, "LIMIT");
+    Order order(base_token, quote_token, side, quantity, "LIMIT", identifier);
     order.id = OrderUtils::generate_order_id();
     order.client_order_uuid = client_order_id;
     order.limit_price = limit_price;

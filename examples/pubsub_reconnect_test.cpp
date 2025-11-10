@@ -5,11 +5,13 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <functional>
 #include <thread>
 #include <unistd.h>
 #include <ctime>
 #include <set>
 #include <map>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <mutex>
@@ -167,8 +169,23 @@ std::vector<std::string> parseEndpoints(const std::string& endpointList) {
     return endpoints;
 }
 
+std::string joinIdentifiers(const std::vector<std::string>& identifiers) {
+    if (identifiers.empty()) {
+        return "(none)";
+    }
+
+    std::ostringstream oss;
+    for (size_t i = 0; i < identifiers.size(); ++i) {
+        if (i > 0) {
+            oss << ", ";
+        }
+        oss << identifiers[i];
+    }
+    return oss.str();
+}
+
 // Publisher thread function
-void publisherThread(const ClusterClientConfig& config, int messageCount, int intervalMs) {
+void publisherThread(const ClusterClientConfig& config, int messageCount, int intervalMs, const std::string& identifier) {
     auto pub_logger = LoggerFactory::instance().getLogger("publisher");
     
     try {
@@ -196,7 +213,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 double quantity = 1.0 + (i * 0.1);
                 double price = 3500.0 + (i * 10.0);
                 
-                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price);
+                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
                 
@@ -209,7 +226,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 headers_ss << "{"
                           << "\"messageId\":\"" << messageId << "\","
                           << "\"messageType\":\"" << messageType << "\","
-                          << "\"identifier\":\"ROHIT_AERON01_TX\","
+                          << "\"identifier\":\"" << identifier << "\","
                           << "\"orderId\":\"" << order.id << "\""
                           << "}";
                 std::string headers = headers_ss.str();
@@ -225,8 +242,8 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 std::istringstream payload_stream(base_payload);
                 if (Json::parseFromStream(reader_builder, payload_stream, &payload_json, &errs)) {
                     // Add identifier at root level for cluster/subscriber to find
-                    payload_json["identifier"] = "ROHIT_AERON01_TX";
-                    payload_json["messageIdentifier"] = "ROHIT_AERON01_TX";
+                    payload_json["identifier"] = identifier;
+                    payload_json["messageIdentifier"] = identifier;
                     
                     // Re-serialize
                     Json::StreamWriterBuilder writer_builder;
@@ -247,8 +264,8 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                     published_message_ids.insert(actualMessageId);
                 }
                 
-                pub_logger->info("Published message {}/{}: {} with identifier ROHIT_AERON01_TX (ID: {}...)", 
-                              messages_published.load(), messageCount, side, actualMessageId);
+                    pub_logger->info("Published message {}/{}: {} with identifier {} (ID: {}...)", 
+                              messages_published.load(), messageCount, side, identifier, actualMessageId);
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -278,11 +295,32 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
 }
 
 // Subscriber thread function
-void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int reconnectDelayMs, int totalMessages, int timeoutMs) {
+void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int reconnectDelayMs, int totalMessages, int timeoutMs, const std::vector<std::string>& identifiers) {
     auto sub_logger = LoggerFactory::instance().getLogger("subscriber");
     
+    std::vector<std::string> subscriptionIdentifiers;
+    {
+        std::unordered_set<std::string> seen_identifiers;
+        for (const auto& id : identifiers) {
+            if (id.empty()) {
+                continue;
+            }
+            if (seen_identifiers.insert(id).second) {
+                subscriptionIdentifiers.push_back(id);
+            }
+        }
+    }
+    if (subscriptionIdentifiers.empty()) {
+        subscriptionIdentifiers.emplace_back("");
+    }
+
     try {
         sub_logger->info("Starting subscriber thread...");
+        if (subscriptionIdentifiers.size() == 1 && subscriptionIdentifiers.front().empty()) {
+            sub_logger->info("Subscribing without identifier filter (all messages).");
+        } else {
+            sub_logger->info("Subscribing to identifiers: {}", joinIdentifiers(subscriptionIdentifiers));
+        }
         
         // Create subscriber client
         auto subscriber = std::make_shared<ClusterClient>(config);
@@ -386,20 +424,33 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 continue;
             }
             
-            // Send subscription request with ROHIT_AERON01_TX identifier
-            try {
-                std::string replay_position = first_connection ? "LAST_COMMIT" : "LAST_COMMIT";
-                
-                sub_logger->info("Sending subscription request for order_notification_topic with identifier ROHIT_AERON01_TX and instance {}...", instance_id);
-                subscriber->send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", replay_position, instance_id);
-                sub_logger->info("Subscription request sent with instance: {}", instance_id);
-            } catch (const std::exception& e) {
-                sub_logger->error("Failed to send subscription request: {}", e.what());
+            std::string replay_position = first_connection ? "LAST_COMMIT" : "LAST_COMMIT";
+
+            bool subscription_error = false;
+            for (const auto& subscription_identifier : subscriptionIdentifiers) {
+                try {
+                    if (subscription_identifier.empty()) {
+                        sub_logger->info("Sending subscription request for order_notification_topic without identifier filter (instance {})...", instance_id);
+                    } else {
+                        sub_logger->info("Sending subscription request for order_notification_topic with identifier {} and instance {}...", subscription_identifier, instance_id);
+                    }
+                    std::string message_id = subscriber->send_subscription_request("order_notification_topic", subscription_identifier, replay_position, instance_id);
+                    sub_logger->debug("Subscription request accepted with message ID: {}", message_id);
+                } catch (const std::exception& e) {
+                    sub_logger->error("Failed to send subscription request for identifier {}: {}", subscription_identifier.empty() ? "<none>" : subscription_identifier, e.what());
+                    subscription_error = true;
+                    break;
+                }
+            }
+
+            if (subscription_error) {
                 sub_logger->warn("Disconnecting and will retry...");
                 subscriber->disconnect();
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
+
+            sub_logger->info("Subscription request(s) sent with instance: {}", instance_id);
             
             first_connection = false;
             
@@ -464,11 +515,11 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     // Final check
                     subscriber->poll_messages(10);
                     
-                    if (messages_received >= totalMessages) {
-                        sub_logger->info("Test complete! All messages received.");
-                        running = false;
-                        break;
-                    }
+                    // if (messages_received >= totalMessages) {
+                    //     sub_logger->info("Test complete! All messages received.");
+                    //     running = false;
+                    //     break;
+                    // }
                 }
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -530,7 +581,7 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 double quantity = 1.0 + (i * 0.1);
                 double price = 3500.0 + (i * 10.0);
                 
-                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price);
+                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
                 
@@ -893,7 +944,7 @@ int main(int argc, char* argv[]) {
     int timeoutMs = 500000;  // milliseconds
     
     // Multi-identifier test options
-    std::string subscribeToIdentifier = "IDENTIFIER_A";
+    std::vector<std::string> subscribeIdentifiers = {"IDENTIFIER_A"};
     std::vector<std::string> publishIdentifiers = {"IDENTIFIER_A", "IDENTIFIER_B", "IDENTIFIER_C"};
     
     for (int i = 1; i < argc; ++i) {
@@ -921,7 +972,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--timeout" && i + 1 < argc) {
             timeoutMs = std::stoi(argv[++i]);
         } else if (arg == "--subscribe-to" && i + 1 < argc) {
-            subscribeToIdentifier = argv[++i];
+            subscribeIdentifiers = parseEndpoints(argv[++i]);
         } else if (arg == "--identifiers" && i + 1 < argc) {
             publishIdentifiers = parseEndpoints(argv[++i]);  // Reuse parseEndpoints for comma-separated list
         } else {
@@ -931,6 +982,11 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    if (subscribeIdentifiers.empty()) {
+        subscribeIdentifiers.emplace_back("");
+    }
+    std::string primarySubscribeIdentifier = subscribeIdentifiers.front();
+
     // NOTE: Signal handlers are automatically installed by SignalHandlerManager
     // when clients register (on connect()). No manual signal handler installation needed.
     // SignalHandlerManager will handle SIGINT and SIGTERM automatically to gracefully
@@ -969,8 +1025,16 @@ int main(int argc, char* argv[]) {
         logger->info("Disconnect after: {} messages", disconnectAt);
         logger->info("Reconnect delay: {}ms", reconnectDelay);
         logger->info("Timeout after publisher finishes: {}ms", timeoutMs);
+        if (subscribeIdentifiers.size() == 1 && subscribeIdentifiers.front().empty()) {
+            logger->info("Subscribe identifiers: ALL (no identifier filter)");
+        } else {
+            logger->info("Subscribe identifiers: {}", joinIdentifiers(subscribeIdentifiers));
+        }
     } else {
-        logger->info("Subscribe to identifier: {}", subscribeToIdentifier);
+        logger->info("Subscribe to identifier: {}", primarySubscribeIdentifier.empty() ? "(none)" : primarySubscribeIdentifier);
+        if (subscribeIdentifiers.size() > 1) {
+            logger->warn("Identifier filter test received multiple identifiers; only '{}' will be used for filtering.", primarySubscribeIdentifier.empty() ? "(none)" : primarySubscribeIdentifier);
+        }
         std::string identifiersStr;
         for (size_t i = 0; i < publishIdentifiers.size(); ++i) {
             identifiersStr += publishIdentifiers[i];
@@ -1016,17 +1080,24 @@ int main(int argc, char* argv[]) {
             
             // Start subscriber thread first
             logger->info("Starting subscriber thread...");
-            std::thread subscriber(subscriberThread, std::ref(sub_config), disconnectAt, reconnectDelay, messageCount, timeoutMs);
+            std::thread subscriber(subscriberThread, std::ref(sub_config), disconnectAt, reconnectDelay, messageCount, timeoutMs, std::cref(subscribeIdentifiers));
             
             // Wait a bit for subscriber to connect and subscribe
             std::this_thread::sleep_for(std::chrono::seconds(3));
             
             // Start publisher thread
             logger->info("Starting publisher thread...");
-            std::thread publisher(publisherThread, std::ref(pub_config), messageCount, messageInterval);
-            
+            std::vector<std::thread> publishers;
+            publishers.reserve(publishIdentifiers.size());
+            for (const auto& identifier : publishIdentifiers) {
+                publishers.emplace_back(publisherThread, std::ref(pub_config), messageCount, messageInterval, identifier);
+            }
             // Wait for threads to complete
-            publisher.join();
+            for (auto& publisher : publishers) {
+                if (publisher.joinable()) {
+                    publisher.join();
+                }
+            }
             logger->info("Publisher thread completed");
             
             subscriber.join();
@@ -1071,7 +1142,7 @@ int main(int argc, char* argv[]) {
             
             // Start subscriber thread first
             logger->info("Starting multi-identifier subscriber thread...");
-            std::thread subscriber(multiIdentifierSubscriberThread, std::ref(sub_config), subscribeToIdentifier, messageCount, timeoutMs);
+            std::thread subscriber(multiIdentifierSubscriberThread, std::ref(sub_config), primarySubscribeIdentifier, messageCount, timeoutMs);
             
             // Wait a bit for subscriber to connect and subscribe
             std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -1105,7 +1176,7 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lock(identifier_mutex);
                 for (const auto& pair : messages_published_by_identifier) {
                     logger->info("  {}: {} messages", pair.first, pair.second);
-                    if (pair.first == subscribeToIdentifier) {
+                    if (pair.first == primarySubscribeIdentifier) {
                         expected_for_subscribed_id = pair.second;
                     }
                 }
@@ -1118,7 +1189,7 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lock(identifier_mutex);
                 for (const auto& pair : messages_received_by_identifier) {
                     logger->info("  {}: {} messages", pair.first, pair.second);
-                    if (pair.first == subscribeToIdentifier) {
+                    if (pair.first == primarySubscribeIdentifier) {
                         received_for_subscribed_id = pair.second;
                     } else {
                         received_for_other_ids += pair.second;
@@ -1134,7 +1205,7 @@ int main(int argc, char* argv[]) {
                 logger->info("========================================");
                 logger->info("TEST PASSED! ✓");
                 logger->info("Identifier filtering works correctly!");
-                logger->info("Subscriber ONLY received messages for identifier: {}", subscribeToIdentifier);
+                logger->info("Subscriber ONLY received messages for identifier: {}", primarySubscribeIdentifier);
                 logger->info("Expected: {}, Received: {}", expected_for_subscribed_id, received_for_subscribed_id);
                 logger->info("Messages from other identifiers: 0");
                 logger->info("========================================");
@@ -1144,10 +1215,10 @@ int main(int argc, char* argv[]) {
                 logger->error("TEST FAILED! ✗");
                 if (received_for_other_ids > 0) {
                     logger->error("CRITICAL: Received {} messages from WRONG identifiers!", received_for_other_ids);
-                    logger->error("Subscriber should ONLY receive messages for identifier: {}", subscribeToIdentifier);
+                    logger->error("Subscriber should ONLY receive messages for identifier: {}", primarySubscribeIdentifier);
                 }
-                logger->error("Expected for {}: {}", subscribeToIdentifier, expected_for_subscribed_id);
-                logger->error("Received for {}: {}", subscribeToIdentifier, received_for_subscribed_id);
+                logger->error("Expected for {}: {}", primarySubscribeIdentifier, expected_for_subscribed_id);
+                logger->error("Received for {}: {}", primarySubscribeIdentifier, received_for_subscribed_id);
                 logger->error("Received from other identifiers: {}", received_for_other_ids);
                 logger->error("========================================");
                 return 1;
