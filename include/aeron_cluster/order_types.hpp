@@ -55,6 +55,9 @@ public:
     // USD conversion rates
     double base_token_usd_rate = 0.0;
     double quote_token_usd_rate = 0.0;
+
+    std::string identifier;
+    std::string message_identifier;
     
     // Additional metadata
     std::unordered_map<std::string, std::string> message;
@@ -72,6 +75,9 @@ public:
     Order(const std::string& base, const std::string& quote, 
           const std::string& side, double qty, const std::string& type = "LIMIT");
 
+    Order(const std::string& base, const std::string& quote, 
+          const std::string& side, double qty, const std::string& type,
+          const std::string& identifier);
     /**
      * @brief Initialize timestamps to current time
      */

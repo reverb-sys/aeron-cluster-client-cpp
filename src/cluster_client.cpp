@@ -1000,7 +1000,8 @@ class ClusterClient::Impl {
                 // Check for message deduplication
                 if (!result.message_id.empty() && is_message_processed(result.message_id)) {
                     // Message already processed, skip
-                    return;
+                    std::cout << "[DEBUG] Message already processed, skipping: " << result.message_id << std::endl;
+                    // return;
                 }
 
                 // Basic debug output to see if we reach this point
@@ -1537,7 +1538,8 @@ bool ClusterClient::offer_ingress(const std::uint8_t* data, std::size_t len) {
 Order ClusterClient::create_sample_limit_order(const std::string& base_token,
                                                const std::string& quote_token,
                                                const std::string& side, double quantity,
-                                               double limit_price) {
+                                               double limit_price,
+                                               const std::string& identifier) {
     // Generate unique identifiers
     std::string uuid = OrderUtils::generate_uuid();
     std::string client_order_id = uuid;
@@ -1549,7 +1551,7 @@ Order ClusterClient::create_sample_limit_order(const std::string& base_token,
     std::string create_ts = std::to_string(timestamp_ms);
 
     // Create order with new structure
-    Order order(base_token, quote_token, side, quantity, "LIMIT");
+    Order order(base_token, quote_token, side, quantity, "LIMIT", identifier);
     order.id = OrderUtils::generate_order_id();
     order.client_order_uuid = client_order_id;
     order.limit_price = limit_price;

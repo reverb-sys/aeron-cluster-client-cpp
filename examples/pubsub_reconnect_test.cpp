@@ -168,7 +168,7 @@ std::vector<std::string> parseEndpoints(const std::string& endpointList) {
 }
 
 // Publisher thread function
-void publisherThread(const ClusterClientConfig& config, int messageCount, int intervalMs) {
+void publisherThread(const ClusterClientConfig& config, int messageCount, int intervalMs, const std::string& identifier) {
     auto pub_logger = LoggerFactory::instance().getLogger("publisher");
     
     try {
@@ -196,7 +196,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 double quantity = 1.0 + (i * 0.1);
                 double price = 3500.0 + (i * 10.0);
                 
-                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price);
+                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
                 
@@ -209,7 +209,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 headers_ss << "{"
                           << "\"messageId\":\"" << messageId << "\","
                           << "\"messageType\":\"" << messageType << "\","
-                          << "\"identifier\":\"ROHIT_AERON01_TX\","
+                          << "\"identifier\":\"" << identifier << "\","
                           << "\"orderId\":\"" << order.id << "\""
                           << "}";
                 std::string headers = headers_ss.str();
@@ -225,8 +225,8 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 std::istringstream payload_stream(base_payload);
                 if (Json::parseFromStream(reader_builder, payload_stream, &payload_json, &errs)) {
                     // Add identifier at root level for cluster/subscriber to find
-                    payload_json["identifier"] = "ROHIT_AERON01_TX";
-                    payload_json["messageIdentifier"] = "ROHIT_AERON01_TX";
+                    payload_json["identifier"] = identifier;
+                    payload_json["messageIdentifier"] = identifier;
                     
                     // Re-serialize
                     Json::StreamWriterBuilder writer_builder;
@@ -247,8 +247,8 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                     published_message_ids.insert(actualMessageId);
                 }
                 
-                pub_logger->info("Published message {}/{}: {} with identifier ROHIT_AERON01_TX (ID: {}...)", 
-                              messages_published.load(), messageCount, side, actualMessageId);
+                    pub_logger->info("Published message {}/{}: {} with identifier {} (ID: {}...)", 
+                              messages_published.load(), messageCount, side, identifier, actualMessageId);
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -278,7 +278,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
 }
 
 // Subscriber thread function
-void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int reconnectDelayMs, int totalMessages, int timeoutMs) {
+void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int reconnectDelayMs, int totalMessages, int timeoutMs, const std::string& identifier) {
     auto sub_logger = LoggerFactory::instance().getLogger("subscriber");
     
     try {
@@ -386,12 +386,12 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 continue;
             }
             
-            // Send subscription request with ROHIT_AERON01_TX identifier
+            // Send subscription request with identifier
             try {
                 std::string replay_position = first_connection ? "LAST_COMMIT" : "LAST_COMMIT";
                 
-                sub_logger->info("Sending subscription request for order_notification_topic with identifier ROHIT_AERON01_TX and instance {}...", instance_id);
-                subscriber->send_subscription_request("order_notification_topic", "ROHIT_AERON01_TX", replay_position, instance_id);
+                sub_logger->info("Sending subscription request for order_notification_topic with identifier {} and instance {}...", identifier, instance_id);
+                subscriber->send_subscription_request("order_notification_topic", identifier, replay_position, instance_id);
                 sub_logger->info("Subscription request sent with instance: {}", instance_id);
             } catch (const std::exception& e) {
                 sub_logger->error("Failed to send subscription request: {}", e.what());
@@ -464,11 +464,11 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     // Final check
                     subscriber->poll_messages(10);
                     
-                    if (messages_received >= totalMessages) {
-                        sub_logger->info("Test complete! All messages received.");
-                        running = false;
-                        break;
-                    }
+                    // if (messages_received >= totalMessages) {
+                    //     sub_logger->info("Test complete! All messages received.");
+                    //     running = false;
+                    //     break;
+                    // }
                 }
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -530,7 +530,7 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 double quantity = 1.0 + (i * 0.1);
                 double price = 3500.0 + (i * 10.0);
                 
-                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price);
+                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
                 
@@ -1016,14 +1016,14 @@ int main(int argc, char* argv[]) {
             
             // Start subscriber thread first
             logger->info("Starting subscriber thread...");
-            std::thread subscriber(subscriberThread, std::ref(sub_config), disconnectAt, reconnectDelay, messageCount, timeoutMs);
+            std::thread subscriber(subscriberThread, std::ref(sub_config), disconnectAt, reconnectDelay, messageCount, timeoutMs, subscribeToIdentifier);
             
             // Wait a bit for subscriber to connect and subscribe
             std::this_thread::sleep_for(std::chrono::seconds(3));
             
             // Start publisher thread
             logger->info("Starting publisher thread...");
-            std::thread publisher(publisherThread, std::ref(pub_config), messageCount, messageInterval);
+            std::thread publisher(publisherThread, std::ref(pub_config), messageCount, messageInterval, publishIdentifiers[0]);
             
             // Wait for threads to complete
             publisher.join();

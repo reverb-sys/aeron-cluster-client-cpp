@@ -10,13 +10,19 @@
 namespace aeron_cluster {
 
 // Order implementation
-Order::Order(const std::string& base, const std::string& quote, 
+Order::Order(const std::string& base, const std::string& quote,
              const std::string& side, double qty, const std::string& type)
+    : Order(base, quote, side, qty, type, "ROHIT_AERON01_TX") {}
+
+Order::Order(const std::string& base, const std::string& quote,
+             const std::string& side, double qty, const std::string& type,
+             const std::string& identifier)
     : base_token(base)
     , quote_token(quote)
     , side(side)
     , quantity(qty)
     , order_type(type)
+    , identifier(identifier)
 {
     quantity_token = base_token;
     limit_price_token = quote_token;
@@ -128,7 +134,7 @@ std::string Order::to_json() const {
     Json::Value headers;
     headers["origin"] = "fix";
     headers["origin_name"] = "FIX_GATEWAY";
-    headers["origin_id"] = "ROHIT_AERON01_TX";
+    headers["origin_id"] = identifier.c_str();
     headers["connection_uuid"] = "130032";
     headers["customer_id"] = std::to_string(customer_id);
     headers["ip_address"] = "10.37.62.251";
