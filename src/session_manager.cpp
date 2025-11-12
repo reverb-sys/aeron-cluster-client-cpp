@@ -446,7 +446,7 @@ class SessionManager::Impl {
 
                 // If failed due to back pressure, use idle strategy (like Go)
                 if (i < 2) {  // Don't sleep on last attempt
-                    std::this_thread::sleep_for(std::chrono::microseconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
 
