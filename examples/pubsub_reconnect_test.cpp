@@ -209,11 +209,11 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
         for (int i = 0; i < messageCount && running; ++i) {
             try {
                 // Create a sample order
-                std::string side = (i % 2 == 0) ? "BUY" : "SELL";
+                std::string side = (i % 2 == 0) ? "buy" : "sell";
                 double quantity = 1.0 + (i * 0.1);
                 double price = 3500.0 + (i * 10.0);
                 
-                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price, identifier);
+                Order order = ClusterClient::create_sample_limit_order("ETH", "USD", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
                 
@@ -522,7 +522,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     // }
                 }
                 
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             
             // If we're done, exit
@@ -577,11 +577,11 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 std::string identifier = identifiers[i % identifiers.size()];
                 
                 // Create a sample order
-                std::string side = (i % 2 == 0) ? "BUY" : "SELL";
+                std::string side = (i % 2 == 0) ? "buy" : "sell";
                 double quantity = 1.0 + (i * 0.1);
                 double price = 3500.0 + (i * 10.0);
                 
-                Order order = ClusterClient::create_sample_limit_order("ETH", "USDC", side, quantity, price, identifier);
+                Order order = ClusterClient::create_sample_limit_order("ETH", "USD", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
                 
@@ -892,7 +892,7 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
                     }
                 }
                 
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             
             // If we're done, exit
@@ -1093,8 +1093,11 @@ int main(int argc, char* argv[]) {
                 publishers.emplace_back(publisherThread, std::ref(pub_config), messageCount, messageInterval, identifier);
             }
             // Wait for threads to complete
+            std::this_thread::sleep_for(std::chrono::seconds(10));
             for (auto& publisher : publishers) {
                 if (publisher.joinable()) {
+                    // logger->info("Joining publisher thread for identifier: {}", identifier);
+                    //sleep for 1 second
                     publisher.join();
                 }
             }
