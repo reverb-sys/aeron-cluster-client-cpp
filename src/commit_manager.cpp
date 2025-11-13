@@ -1,5 +1,7 @@
 #include "aeron_cluster/commit_manager.hpp"
 #include "aeron_cluster/subscription.hpp"
+#include "model/CommitOffsetLite.h"
+#include "model/MessageHeader.h"
 #include <json/json.h>
 #include <iostream>
 #include <sstream>
@@ -8,6 +10,17 @@
 #include <mutex>
 
 namespace aeron_cluster {
+
+namespace {
+// Map canonical topic string to numeric topicId used by server
+inline std::uint32_t topic_to_id(const std::string& topic) {
+    if (topic == "order_request_topic") return 1;
+    if (topic == "order_notification_topic") return 2;
+    if (topic == "orders") return 3;
+    if (topic == "order_status_request_topic") return 4;
+    return 0; // unknown
+}
+} // namespace
 
 CommitManager::CommitManager() = default;
 
@@ -93,28 +106,47 @@ std::vector<std::uint8_t> CommitManager::build_commit_message(const std::string&
 
 std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::string& topic, const std::string& client_id, 
                                                                     const CommitOffset& offset) const {
-    // Create the commit offset message in the same format as Go client
+    // Prefer ultra-fast CommitOffsetLite SBE template
+    const std::uint32_t topicId = topic_to_id(offset.topic);
+    if (topicId != 0) {
+        const std::string& messageId = offset.message_id;
+        const std::string& messageIdentifier = offset.message_identifier;
+        const std::size_t headerLen = sbe::MessageHeader::encodedLength();
+        const std::size_t bodyLen = sbe::CommitOffsetLite::computeLength(messageId.size(), messageIdentifier.size());
+        const std::size_t total = headerLen + bodyLen;
+        
+        std::vector<std::uint8_t> buf(total);
+        char* ptr = reinterpret_cast<char*>(buf.data());
+        
+        sbe::CommitOffsetLite lite;
+        lite.wrapAndApplyHeader(ptr, 0, buf.size());
+        lite.topicId(topicId);
+        lite.sequence(offset.sequence_number);
+        lite.putMessageId(messageId.c_str(), static_cast<std::uint16_t>(messageId.size()));
+        lite.putMessageIdentifier(messageIdentifier.c_str(), static_cast<std::uint16_t>(messageIdentifier.size()));
+        
+        // Resize to actual size (header + encoded body)
+        const std::size_t encoded = headerLen + static_cast<std::size_t>(lite.encodedLength());
+        buf.resize(encoded);
+        return buf;
+    }
+
+    // Fallback: legacy TopicMessage with JSON payload (kept for backward compatibility)
     Json::Value commitMessage;
     commitMessage["action"] = "COMMIT_OFFSET";
     commitMessage["topic"] = offset.topic;
     commitMessage["message_id"] = offset.message_id;
     commitMessage["timestamp_nanos"] = static_cast<Json::UInt64>(offset.timestamp_nanos);
-    commitMessage["sequence_number"] = static_cast<Json::Int>(offset.sequence_number);
+    commitMessage["sequence_number"] = static_cast<Json::UInt64>(offset.sequence_number);
     commitMessage["messageIdentifier"] = offset.message_identifier;
 
-    // Convert to JSON string
     Json::StreamWriterBuilder builder;
     builder["indentation"] = "";
     std::string messageJson = Json::writeString(builder, commitMessage);
 
-    // Debug: Print the commit offset payload being sent
-    std::cout << "[DEBUG] Sending commit offset payload: " << messageJson << std::endl;
-
-    // Prepare buffer (oversized to avoid reallocs)
     std::vector<std::uint8_t> buf;
     buf.resize(8 /*header*/ + 16 /*timestamp + sequenceNumber*/ + 1024);
 
-    // Encode header
     sbe::MessageHeader hdr;
     hdr.wrap(reinterpret_cast<char*>(buf.data()), 0, SBE_VERSION, static_cast<std::uint64_t>(buf.size()));
     hdr.blockLength(TOPIC_MESSAGE_BLOCK_LENGTH);
@@ -122,29 +154,21 @@ std::vector<std::uint8_t> CommitManager::build_commit_offset_message(const std::
     hdr.schemaId(SBE_SCHEMA_ID);
     hdr.version(SBE_VERSION);
 
-    // Encode TopicMessage
     sbe::TopicMessage msg;
     msg.wrapForEncode(reinterpret_cast<char*>(buf.data()), 8, static_cast<std::uint64_t>(buf.size() - 8));
 
     msg.timestamp(now_nanos());
-    msg.sequenceNumber(0); // Will be set by server, client sends 0
-
-    // Use the same approach as Go client: send to _subscriptions topic with COMMIT_OFFSET message type
+    msg.sequenceNumber(0);
     msg.putTopic(TOPIC_SUBSCRIPTIONS, static_cast<std::uint16_t>(std::char_traits<char>::length(TOPIC_SUBSCRIPTIONS)));
     msg.putMessageType(MSGTYPE_COMMIT_OFFSET, static_cast<std::uint16_t>(std::char_traits<char>::length(MSGTYPE_COMMIT_OFFSET)));
-
-    // UUID: commit_offset_<client>_<ts>
     {
         std::string uuid = std::string("commit_offset_") + client_id + "_" + std::to_string(now_nanos());
         msg.putUuid(uuid.c_str(), static_cast<std::uint16_t>(uuid.size()));
     }
-
-    // Set payload to the JSON message (same as Go client)
     msg.putPayload(messageJson.data(), static_cast<std::uint16_t>(messageJson.size()));
     static const char emptyHeaders[] = "{}";
     msg.putHeaders(emptyHeaders, 2);
 
-    // Compute encoded length
     const int encodedLen = 8 + msg.encodedLength();
     buf.resize(encodedLen);
     return buf;
