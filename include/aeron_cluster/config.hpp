@@ -63,6 +63,9 @@ struct ClusterClientConfig {
     bool enable_console_warnings = true;
     bool enable_console_errors = true;
     bool enable_hex_dumps = false;
+    
+    // Commit logging
+    bool commit_log_enabled = false;
 
     /**
      * @brief Validate configuration parameters

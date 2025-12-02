@@ -249,16 +249,9 @@ void SignalHandlerManager::signal_handler(int signal) {
         write(2, "ERROR: instance_ is null!\n", 26);
     }
     
-    const char msg3[] = "*** EXITING ***\n";
-    write(1, msg3, 17);
-    write(2, msg3, 17);
-    
-    // Exit immediately using _exit() which is async-signal-safe
-#if defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__))
-    _exit(128 + signal);  // Standard Unix exit code for signals
-#else
-    std::exit(128 + signal);
-#endif
+    // Do not exit the process from within the library.
+    // Leave it to the application to decide how to handle the signal.
+    return;
 }
 
 void SignalHandlerManager::disconnect_all_clients() {

@@ -103,9 +103,16 @@ class ClusterClient::Impl {
 
         session_manager_->set_connection_state_callback(
             [this](bool connected) { this->on_session_connection_state_changed(connected); });
+
+        ack_flush_running_.store(true);
+        ack_flush_thread_ = std::thread([this]() { ack_flush_loop(); });
     }
 
     ~Impl() {
+        ack_flush_running_.store(false);
+        if (ack_flush_thread_.joinable()) {
+            ack_flush_thread_.join();
+        }
         try {
             stop_polling();
             disconnect();
@@ -615,6 +622,14 @@ class ClusterClient::Impl {
             return false;
         }
 
+        if (config_.commit_log_enabled) {
+            if (logger_) {
+                logger_->info("COMMIT-LOG: send_commit_request topic={}", topic);
+            } else {
+                std::cout << "[COMMIT-LOG] send_commit_request topic=" << topic << std::endl;
+            }
+        }
+
         auto frame = commit_manager_->build_commit_message(topic, config_.client_id);
         return session_manager_->send_raw_message(frame);
     }
@@ -641,6 +656,14 @@ class ClusterClient::Impl {
         // to include the session envelope wrapper that the cluster expects
         bool result = session_manager_->send_combined_message(frame);
         
+        if (config_.commit_log_enabled) {
+            if (logger_) {
+                logger_->info("COMMIT-LOG: send_commit_offset topic={}", topic);
+            } else {
+                std::cout << "[COMMIT-LOG] send_commit_offset topic=" << topic << std::endl;
+            }
+        }
+
         if (config_.debug_logging) {
             DEBUG_LOG("send_commit_offset result: ", result, " session_id: ", get_session_id());
         }
@@ -1090,13 +1113,9 @@ class ClusterClient::Impl {
                     std::uint64_t timestamp_nanos = result.timestamp;
                     std::uint64_t sequence_number = result.sequence_number;
                     
-                    // Commit locally
-                    commit_manager_->commit_message(topic, message_identifier, result.message_id, 
-                                                   timestamp_nanos, sequence_number);
-                    
-                    // Send commit offset to server asynchronously
-                    send_commit_offset_async(topic, message_identifier, result.message_id, 
-                                           timestamp_nanos, sequence_number);
+                    CommitOffset offset(topic, message_identifier, result.message_id,
+                                        timestamp_nanos, sequence_number);
+                    buffer_ack(offset);
                     
                     if (config_.debug_logging) {
                         DEBUG_LOG("Message processed and committed successfully for topic: ", topic);
@@ -1916,6 +1935,11 @@ ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_keepalive_interval(
 
 ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_debug_logging(bool enabled) {
     config_.debug_logging = enabled;
+    return *this;
+}
+
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_commit_logging(bool enabled) {
+    config_.commit_log_enabled = enabled;
     return *this;
 }
 
