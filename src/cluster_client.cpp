@@ -600,6 +600,13 @@ class ClusterClient::Impl {
                        std::uint64_t sequence_number) {
         if (commit_manager_) {
             commit_manager_->commit_message(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
+            if (config_.commit_log_enabled) {
+                if (logger_) {
+                    logger_->info("COMMIT-LOG: commit_message topic={}", topic);
+                } else {
+                    std::cout << "[COMMIT-LOG] commit_message topic=" << topic << std::endl;
+                }
+            }
         }
     }
 
