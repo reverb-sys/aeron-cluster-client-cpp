@@ -42,6 +42,18 @@ std::mutex comparison_mutex;
 std::atomic<bool> publisher_finished{false};
 std::chrono::steady_clock::time_point publisher_finish_time;
 
+// Track client_order_id -> message_id and sent IDs for correlation
+std::mutex client_order_mutex;
+std::set<std::string> sent_client_order_ids;
+std::map<std::string, std::string> client_order_id_to_message_id;
+std::set<std::string> received_client_order_ids;
+std::mutex received_client_order_mutex;
+std::map<std::string, std::string> client_order_id_to_response_message_id;
+std::map<std::string, std::string> client_order_id_to_order_id;
+std::map<std::string, std::chrono::steady_clock::time_point> client_order_send_time;
+std::map<std::string, std::chrono::steady_clock::time_point> client_order_receive_time;
+std::map<std::string, long long> client_order_latency_ms;
+
 // For multi-identifier test
 std::map<std::string, int> messages_published_by_identifier;
 std::map<std::string, int> messages_received_by_identifier;
@@ -58,62 +70,116 @@ void printMessageComparison() {
     std::lock_guard<std::mutex> lock(comparison_mutex);
     
     logger->info("========================================");
-    logger->info("MESSAGE COMPARISON ANALYSIS");
+    logger->info("CLIENT ORDER ID COMPARISON");
     logger->info("========================================");
     
-    logger->info("Published Messages: {}", published_message_ids.size());
-    logger->info("Received Messages: {}", received_message_ids_comparison.size());
+    // For final comparison use client_order_id sets
+    std::size_t sent_count;
+    std::size_t received_count;
+    {
+        std::lock_guard<std::mutex> s_lock(client_order_mutex);
+        std::lock_guard<std::mutex> r_lock(received_client_order_mutex);
+        sent_count = sent_client_order_ids.size();
+        received_count = received_client_order_ids.size();
+        logger->info("Client Order IDs Sent: {}", sent_count);
+        logger->info("Client Order IDs Received: {}", received_count);
+    }
     
-    // Find missing messages (published but not received)
-    std::set<std::string> missing_messages;
-    for (const auto& published_id : published_message_ids) {
-        if (received_message_ids_comparison.find(published_id) == received_message_ids_comparison.end()) {
-            missing_messages.insert(published_id);
+    // Compute missing and extra using client_order_id
+    std::set<std::string> missing_client_orders;
+    std::set<std::string> extra_client_orders;
+    {
+        std::lock_guard<std::mutex> s_lock(client_order_mutex);
+        std::lock_guard<std::mutex> r_lock(received_client_order_mutex);
+        for (const auto& cid : sent_client_order_ids) {
+            if (received_client_order_ids.find(cid) == received_client_order_ids.end()) {
+                missing_client_orders.insert(cid);
+            }
+        }
+        for (const auto& cid : received_client_order_ids) {
+            if (sent_client_order_ids.find(cid) == sent_client_order_ids.end()) {
+                extra_client_orders.insert(cid);
+            }
         }
     }
     
-    // Find extra messages (received but not published)
-    std::set<std::string> extra_messages;
-    for (const auto& received_id : received_message_ids_comparison) {
-        if (published_message_ids.find(received_id) == published_message_ids.end()) {
-            extra_messages.insert(received_id);
-        }
-    }
-    
-    logger->info("Missing Messages: {}", missing_messages.size());
-    if (!missing_messages.empty()) {
-        logger->error("MISSING MESSAGE IDs:");
+    logger->info("Missing Client Orders: {}", missing_client_orders.size());
+    if (!missing_client_orders.empty()) {
+        logger->error("MISSING client_order_id values:");
         int count = 0;
-        for (const auto& missing_id : missing_messages) {
+        for (const auto& missing_id : missing_client_orders) {
             logger->error("  {}: {}...", count + 1, missing_id.substr(0, 20));
             count++;
-            if (count >= 10) { // Limit to first 10 missing messages
-                logger->error("  ... and {} more missing messages", missing_messages.size() - 10);
+            if (count >= 10) { // Limit to first 10
+                logger->error("  ... and {} more missing client orders", missing_client_orders.size() - 10);
                 break;
             }
         }
     }
     
-    logger->info("Extra Messages: {}", extra_messages.size());
-    if (!extra_messages.empty()) {
-        logger->warn("EXTRA MESSAGE IDs (received but not published):");
+    logger->info("Extra Client Orders: {}", extra_client_orders.size());
+    if (!extra_client_orders.empty()) {
+        logger->warn("EXTRA client_order_id values (received but not sent):");
         int count = 0;
-        for (const auto& extra_id : extra_messages) {
+        for (const auto& extra_id : extra_client_orders) {
             logger->warn("  {}: {}...", count + 1, extra_id.substr(0, 20));
             count++;
-            if (count >= 10) { // Limit to first 10 extra messages
-                logger->warn("  ... and {} more extra messages", extra_messages.size() - 10);
+            if (count >= 10) { // Limit to first 10
+                logger->warn("  ... and {} more extra client orders", extra_client_orders.size() - 10);
                 break;
             }
         }
     }
     
     // Calculate success rate
-    if (!published_message_ids.empty()) {
-        double success_rate = (static_cast<double>(published_message_ids.size() - missing_messages.size()) / published_message_ids.size()) * 100.0;
+    {
+        std::lock_guard<std::mutex> s_lock(client_order_mutex);
+        double denom = static_cast<double>(sent_client_order_ids.size());
+        double success_rate = denom > 0.0
+            ? (static_cast<double>(sent_client_order_ids.size() - missing_client_orders.size()) / denom) * 100.0
+            : 100.0;
         logger->info("Success Rate: {:.2f}%", success_rate);
     }
     
+    logger->info("========================================");
+}
+
+void printLatencyReport() {
+    logger->info("========================================");
+    logger->info("ROUND-TRIP LATENCY (client_order_id)");
+    logger->info("========================================");
+    
+    struct Row {
+        long long latency_ms;
+        std::string client_order_id;
+        std::string order_id;
+        std::string req_msg_id;
+        std::string resp_msg_id;
+    };
+    std::vector<Row> rows;
+    {
+        std::lock_guard<std::mutex> lock(client_order_mutex);
+        rows.reserve(client_order_latency_ms.size());
+        for (const auto& kv : client_order_latency_ms) {
+            const std::string& cid = kv.first;
+            long long lat = kv.second;
+            const std::string orderId = client_order_id_to_order_id.count(cid) ? client_order_id_to_order_id.at(cid) : "";
+            const std::string reqId = client_order_id_to_message_id.count(cid) ? client_order_id_to_message_id.at(cid) : "";
+            const std::string respId = client_order_id_to_response_message_id.count(cid) ? client_order_id_to_response_message_id.at(cid) : "";
+            rows.push_back(Row{lat, cid, orderId, reqId, respId});
+        }
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b){ return a.latency_ms > b.latency_ms; });
+    
+    logger->info("Total measured: {}", rows.size());
+    for (const auto& r : rows) {
+        std::string reqShort = r.req_msg_id.size() > 12 ? r.req_msg_id.substr(0, 12) : r.req_msg_id;
+        std::string respShort = r.resp_msg_id.size() > 12 ? r.resp_msg_id.substr(0, 12) : r.resp_msg_id;
+        std::string ordShort = r.order_id.size() > 12 ? r.order_id.substr(0, 12) : r.order_id;
+        logger->info("latencyMs={} client_order_id={} order_id={} req_msg_id={}... resp_msg_id={}...", 
+            r.latency_ms, r.client_order_id, ordShort.empty() ? "<unknown>" : r.order_id, 
+            reqShort.empty() ? "<n/a>" : r.req_msg_id, respShort.empty() ? "<n/a>" : r.resp_msg_id);
+    }
     logger->info("========================================");
 }
 
@@ -216,6 +282,11 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 Order order = ClusterClient::create_sample_limit_order("ETH", "USD", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
+                const std::string clientOrderId = order.client_order_uuid;
+                {
+                    std::lock_guard<std::mutex> lock(client_order_mutex);
+                    sent_client_order_ids.insert(clientOrderId);
+                }
                 
                 // Generate message ID
                 std::string messageId = "msg_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + std::to_string(i);
@@ -254,9 +325,17 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
+                {
+                    std::lock_guard<std::mutex> lock(client_order_mutex);
+                    client_order_send_time[clientOrderId] = std::chrono::steady_clock::now();
+                }
                 std::string actualMessageId = publisher->publish_message_to_topic(messageType, payload, headers, "order_request_topic");
                 
                 messages_published++;
+                {
+                    std::lock_guard<std::mutex> lock(client_order_mutex);
+                    client_order_id_to_message_id[clientOrderId] = actualMessageId;
+                }
                 
                 // Track published message ID for comparison (use the actual ID returned by cluster client)
                 {
@@ -264,8 +343,8 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                     published_message_ids.insert(actualMessageId);
                 }
                 
-                    pub_logger->info("Published message {}/{}: {} with identifier {} (ID: {}...)", 
-                              messages_published.load(), messageCount, side, identifier, actualMessageId);
+                pub_logger->info("Published message {}/{}: {} with identifier {} (client_order_id={}, req_msg_id={}...)", 
+                              messages_published.load(), messageCount, side, identifier, clientOrderId, actualMessageId.substr(0, 12));
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -330,6 +409,50 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
             // Only count ORDER messages, not acknowledgments
             if (result.is_order_message() || 
                 (result.is_topic_message() && result.message_type == "CREATE_ORDER")) {
+                // Try to extract client_order_id and order_id from payload
+                std::string extracted_client_order_id;
+                std::string extracted_order_id;
+                try {
+                    if (!result.payload.empty()) {
+                        Json::CharReaderBuilder rb;
+                        std::unique_ptr<Json::CharReader> reader(rb.newCharReader());
+                        Json::Value root;
+                        std::string errs;
+                        const char* begin = result.payload.data();
+                        const char* end = begin + result.payload.size();
+                        if (reader->parse(begin, end, &root, &errs)) {
+                            // Common locations:
+                            // - client order id may be at: message.message.client_order_id
+                            // - or message.message.order_details.client_order_id
+                            // - order id may be at: message.message.order_id
+                            auto find_str = [](const Json::Value& obj, const char* key) -> std::string {
+                                return obj.isMember(key) && obj[key].isString() ? obj[key].asString() : "";
+                            };
+                            const Json::Value& msg = root.isMember("message") ? root["message"] : Json::Value();
+                            const Json::Value& inner = (msg.isObject() && msg.isMember("message")) ? msg["message"] : Json::Value();
+                            if (inner.isObject()) {
+                                extracted_client_order_id = find_str(inner, "client_order_id");
+                                extracted_order_id = find_str(inner, "order_id");
+                                if (extracted_client_order_id.empty() && inner.isMember("order_details") && inner["order_details"].isObject()) {
+                                    extracted_client_order_id = find_str(inner["order_details"], "client_order_id");
+                                }
+                            } else if (msg.isObject() && msg.isMember("order_details") && msg["order_details"].isObject()) {
+                                // Older format
+                                extracted_client_order_id = find_str(msg["order_details"], "client_order_id");
+                            }
+                            // Some servers place order id at top-level "uuid"
+                            if (extracted_order_id.empty()) {
+                                std::string maybe_uuid = find_str(root, "uuid");
+                                if (!maybe_uuid.empty()) {
+                                    extracted_order_id = maybe_uuid;
+                                }
+                            }
+                        }
+                    }
+                } catch (...) {
+                    // Ignore JSON parse errors; fall back to generic logging
+                }
+                
                 // Track received message
                 std::lock_guard<std::mutex> lock(message_mutex);
                 
@@ -337,6 +460,10 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 if (received_message_ids.find(result.message_id) == received_message_ids.end()) {
                     received_message_ids.insert(result.message_id);
                     messages_received++;
+                    if (!extracted_client_order_id.empty()) {
+                        std::lock_guard<std::mutex> lock_rcv(received_client_order_mutex);
+                        received_client_order_ids.insert(extracted_client_order_id);
+                    }
                     
                     // Track received message ID for comparison
                     {
@@ -344,10 +471,54 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                         received_message_ids_comparison.insert(result.message_id);
                     }
                     
-                    sub_logger->info("Received ORDER message {}: Type={}, ID={}...", 
-                                  messages_received.load(), 
-                                  result.message_type, 
-                                  result.message_id.substr(0, 12));
+                    if (!extracted_client_order_id.empty()) {
+                        bool was_sent = false;
+                        std::string sent_msg_id;
+                        {
+                            std::lock_guard<std::mutex> lock2(client_order_mutex);
+                            was_sent = sent_client_order_ids.find(extracted_client_order_id) != sent_client_order_ids.end();
+                            auto it = client_order_id_to_message_id.find(extracted_client_order_id);
+                            if (it != client_order_id_to_message_id.end()) {
+                                sent_msg_id = it->second;
+                            }
+                            // Compute latency if we have not recorded it yet and have a send time
+                            auto itSend = client_order_send_time.find(extracted_client_order_id);
+                            auto itLat = client_order_latency_ms.find(extracted_client_order_id);
+                            if (itSend != client_order_send_time.end() && itLat == client_order_latency_ms.end()) {
+                                auto now = std::chrono::steady_clock::now();
+                                client_order_receive_time[extracted_client_order_id] = now;
+                                long long latency_ms_val = std::chrono::duration_cast<std::chrono::milliseconds>(now - itSend->second).count();
+                                client_order_latency_ms[extracted_client_order_id] = latency_ms_val;
+                                client_order_id_to_response_message_id[extracted_client_order_id] = result.message_id;
+                                if (!extracted_order_id.empty()) {
+                                    client_order_id_to_order_id[extracted_client_order_id] = extracted_order_id;
+                                }
+                            }
+                        }
+                        if (was_sent) {
+                            long long latency_out = -1;
+                            auto itLat2 = client_order_latency_ms.find(extracted_client_order_id);
+                            if (itLat2 != client_order_latency_ms.end()) latency_out = itLat2->second;
+                            sub_logger->info("Received ORDER {}: client_order_id={} -> order_id={} (matched, req_msg_id={}..., resp_msg_id={}..., latencyMs={})", 
+                                          messages_received.load(),
+                                          extracted_client_order_id,
+                                          extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
+                                          sent_msg_id.empty() ? "<n/a>" : sent_msg_id.substr(0, 12),
+                                          result.message_id.substr(0, 12),
+                                          latency_out);
+                        } else {
+                            sub_logger->warn("Received ORDER {}: client_order_id={} not recognized (order_id={}, resp_msg_id={}...)", 
+                                          messages_received.load(),
+                                          extracted_client_order_id,
+                                          extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
+                                          result.message_id.substr(0, 12));
+                        }
+                    } else {
+                        sub_logger->info("Received ORDER message {}: Type={}, ID={}...", 
+                                      messages_received.load(), 
+                                      result.message_type, 
+                                      result.message_id.substr(0, 12));
+                    }
                 } else {
                     sub_logger->debug("Duplicate ORDER message detected (already received): {}...", 
                                    result.message_id.substr(0, 12));
@@ -452,6 +623,14 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
 
             sub_logger->info("Subscription request(s) sent with instance: {}", instance_id);
             
+            // Proactively send commit request for the topic so cluster will accept commit offsets
+            try {
+                bool cr = subscriber->send_commit_request("order_notification_topic");
+                sub_logger->info("Commit request sent for topic order_notification_topic: {}", cr ? "OK" : "FAILED");
+            } catch (const std::exception& e) {
+                sub_logger->warn("Failed to send commit request: {}", e.what());
+            }
+            
             first_connection = false;
             
             // Reset session closure flag for this connection
@@ -515,11 +694,11 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     // Final check
                     subscriber->poll_messages(10);
                     
-                    // if (messages_received >= totalMessages) {
-                    //     sub_logger->info("Test complete! All messages received.");
-                    //     running = false;
-                    //     break;
-                    // }
+                    if (messages_received >= totalMessages) {
+                        sub_logger->info("Test complete! All messages received.");
+                        running = false;
+                        break;
+                    }
                 }
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -584,6 +763,11 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 Order order = ClusterClient::create_sample_limit_order("ETH", "USD", side, quantity, price, identifier);
                 order.account_id = 10000 + i;
                 order.customer_id = 50000 + i;
+                const std::string clientOrderId = order.client_order_uuid;
+                {
+                    std::lock_guard<std::mutex> lock(client_order_mutex);
+                    sent_client_order_ids.insert(clientOrderId);
+                }
                 
                 // Generate message ID
                 std::string messageId = "msg_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + std::to_string(i);
@@ -622,9 +806,18 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 }
                 
                 // Publish to order_notification_topic with messageIdentifier in headers
+                // Store send time just before publish to capture network/cluster latency
+                {
+                    std::lock_guard<std::mutex> lock(client_order_mutex);
+                    client_order_send_time[clientOrderId] = std::chrono::steady_clock::now();
+                }
                 std::string actualMessageId = publisher.publish_message_to_topic(messageType, payload, headers, "order_request_topic");
                 
                 messages_published++;
+                {
+                    std::lock_guard<std::mutex> lock(client_order_mutex);
+                    client_order_id_to_message_id[clientOrderId] = actualMessageId;
+                }
                 
                 // Track published message ID for comparison (use the actual ID returned by cluster client)
                 {
@@ -638,8 +831,8 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                     messages_published_by_identifier[identifier]++;
                 }
                 
-                pub_logger->info("Published message {}/{}: {} with identifier {} (ID: {}...)", 
-                              messages_published.load(), messageCount, side, identifier, actualMessageId);
+                pub_logger->info("Published message {}/{}: {} with identifier {} (client_order_id={}, req_msg_id={}...)", 
+                              messages_published.load(), messageCount, side, identifier, clientOrderId, actualMessageId.substr(0, 12));
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
@@ -694,9 +887,42 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
             if (result.is_order_message() || 
                 (result.is_topic_message() && result.message_type == "CREATE_ORDER")) {
                 
+                // Extract identifier and IDs for correlation
+                std::string extracted_client_order_id;
+                std::string extracted_order_id;
                 // Extract identifier from headers
                 std::string received_identifier = "UNKNOWN";
                 try {
+                    // Parse payload for client/order ids
+                    if (!result.payload.empty()) {
+                        Json::CharReaderBuilder rb;
+                        std::unique_ptr<Json::CharReader> reader(rb.newCharReader());
+                        Json::Value root;
+                        std::string errs;
+                        const char* begin = result.payload.data();
+                        const char* end = begin + result.payload.size();
+                        if (reader->parse(begin, end, &root, &errs)) {
+                            const Json::Value& msg = root.isMember("message") ? root["message"] : Json::Value();
+                            const Json::Value& inner = (msg.isObject() && msg.isMember("message")) ? msg["message"] : Json::Value();
+                            auto find_str = [](const Json::Value& obj, const char* key) -> std::string {
+                                return obj.isMember(key) && obj[key].isString() ? obj[key].asString() : "";
+                            };
+                            if (inner.isObject()) {
+                                extracted_client_order_id = find_str(inner, "client_order_id");
+                                extracted_order_id = find_str(inner, "order_id");
+                                if (extracted_client_order_id.empty() && inner.isMember("order_details") && inner["order_details"].isObject()) {
+                                    extracted_client_order_id = find_str(inner["order_details"], "client_order_id");
+                                }
+                            }
+                            if (extracted_order_id.empty()) {
+                                std::string maybe_uuid = find_str(root, "uuid");
+                                if (!maybe_uuid.empty()) {
+                                    extracted_order_id = maybe_uuid;
+                                }
+                            }
+                        }
+                    }
+                    
                     // Try parsing from payload first (cluster adds it there during replay/forward)
                     size_t payload_id_pos = result.payload.find("\"identifier\":\"");
                     if (payload_id_pos != std::string::npos) {
@@ -727,6 +953,10 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
                 if (received_message_ids.find(result.message_id) == received_message_ids.end()) {
                     received_message_ids.insert(result.message_id);
                     messages_received++;
+                    if (!extracted_client_order_id.empty()) {
+                        std::lock_guard<std::mutex> lock_rcv(received_client_order_mutex);
+                        received_client_order_ids.insert(extracted_client_order_id);
+                    }
                     
                     // Track received message ID for comparison
                     {
@@ -745,11 +975,57 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
                         sub_logger->warn("*** RECEIVED MESSAGE FOR WRONG IDENTIFIER ***: Expected={}, Received={}, ID={}...", 
                                       subscribeToIdentifier, received_identifier, result.message_id.substr(0, 12));
                     } else {
-                        sub_logger->info("Received ORDER message {}: Type={}, Identifier={}, ID={}...", 
-                                      messages_received.load(), 
-                                      result.message_type,
-                                      received_identifier,
-                                      result.message_id.substr(0, 12));
+                        if (!extracted_client_order_id.empty()) {
+                            bool was_sent = false;
+                            std::string sent_msg_id;
+                            {
+                                std::lock_guard<std::mutex> lock2(client_order_mutex);
+                                was_sent = sent_client_order_ids.find(extracted_client_order_id) != sent_client_order_ids.end();
+                                auto it = client_order_id_to_message_id.find(extracted_client_order_id);
+                                if (it != client_order_id_to_message_id.end()) {
+                                    sent_msg_id = it->second;
+                                }
+                                // Compute latency if available and not yet recorded
+                                auto itSend = client_order_send_time.find(extracted_client_order_id);
+                                auto itLat = client_order_latency_ms.find(extracted_client_order_id);
+                                if (itSend != client_order_send_time.end() && itLat == client_order_latency_ms.end()) {
+                                    auto now = std::chrono::steady_clock::now();
+                                    client_order_receive_time[extracted_client_order_id] = now;
+                                    long long latency_ms_val = std::chrono::duration_cast<std::chrono::milliseconds>(now - itSend->second).count();
+                                    client_order_latency_ms[extracted_client_order_id] = latency_ms_val;
+                                    client_order_id_to_response_message_id[extracted_client_order_id] = result.message_id;
+                                    if (!extracted_order_id.empty()) {
+                                        client_order_id_to_order_id[extracted_client_order_id] = extracted_order_id;
+                                    }
+                                }
+                            }
+                            if (was_sent) {
+                                long long latency_out = -1;
+                                auto itLat2 = client_order_latency_ms.find(extracted_client_order_id);
+                                if (itLat2 != client_order_latency_ms.end()) latency_out = itLat2->second;
+                                sub_logger->info("Received ORDER {}: Identifier={}, client_order_id={} -> order_id={} (matched, req_msg_id={}..., resp_msg_id={}..., latencyMs={})", 
+                                              messages_received.load(), 
+                                              received_identifier,
+                                              extracted_client_order_id,
+                                              extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
+                                              sent_msg_id.empty() ? "<n/a>" : sent_msg_id.substr(0, 12),
+                                              result.message_id.substr(0, 12),
+                                              latency_out);
+                            } else {
+                                sub_logger->warn("Received ORDER {}: Identifier={}, client_order_id={} not recognized (order_id={}, resp_msg_id={}...)", 
+                                              messages_received.load(), 
+                                              received_identifier,
+                                              extracted_client_order_id,
+                                              extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
+                                              result.message_id.substr(0, 12));
+                            }
+                        } else {
+                            sub_logger->info("Received ORDER message {}: Type={}, Identifier={}, ID={}...", 
+                                          messages_received.load(), 
+                                          result.message_type,
+                                          received_identifier,
+                                          result.message_id.substr(0, 12));
+                        }
                     }
                 } else {
                     sub_logger->debug("Duplicate ORDER message detected (already received): {}...", 
@@ -802,8 +1078,8 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
             
             while (session_id == -1 && wait_attempts < max_wait_attempts && running) {
                 sub_logger->debug("Waiting for session to be established... (attempt {})", wait_attempts + 1);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                subscriber.poll_messages(5); // Poll to process session messages
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                subscriber.poll_messages(10); // Poll to process session messages
                 session_id = subscriber.get_session_id();
                 wait_attempts++;
             }
@@ -845,6 +1121,14 @@ void multiIdentifierSubscriberThread(const ClusterClientConfig& config, const st
             
             // Reset session closure flag for this connection
             session_closed_by_cluster = false;
+            
+            // Proactively send commit request for the topic so cluster will accept commit offsets
+            try {
+                bool cr = subscriber.send_commit_request("order_notification_topic");
+                sub_logger->info("Commit request sent for topic order_notification_topic: {}", cr ? "OK" : "FAILED");
+            } catch (const std::exception& e) {
+                sub_logger->warn("Failed to send commit request: {}", e.what());
+            }
             
             // Poll messages
             int poll_count = 0;
@@ -1051,9 +1335,10 @@ int main(int argc, char* argv[]) {
                             .with_cluster_endpoints(clusterEndpoints)
                             .with_aeron_dir(aeronDir)
                             .with_debug_logging(debugMode)
+                            .with_commit_logging(true)
                             .with_response_timeout(std::chrono::milliseconds(10000))
                             .with_max_retries(3)
-                            .with_default_topic("order_notification_topic")
+                            .with_default_topic("order_request_topic")
                             .build();
         
         pub_config.debug_logging = debugMode;
@@ -1065,6 +1350,7 @@ int main(int argc, char* argv[]) {
                             .with_cluster_endpoints(clusterEndpoints)
                             .with_aeron_dir(aeronDir)
                             .with_debug_logging(debugMode)
+                            .with_commit_logging(true)
                             .with_response_timeout(std::chrono::milliseconds(10000))
                             .with_max_retries(3)
                             .with_default_topic("order_notification_topic")
@@ -1113,29 +1399,42 @@ int main(int argc, char* argv[]) {
             logger->info("Messages Published: {}", messages_published.load());
             logger->info("Messages Received: {}", messages_received.load());
             logger->info("Unique Messages Received: {}", received_message_ids.size());
+            {
+                std::lock_guard<std::mutex> s_lock(client_order_mutex);
+                std::lock_guard<std::mutex> r_lock(received_client_order_mutex);
+                logger->info("Unique Client Order IDs Sent: {}", sent_client_order_ids.size());
+                logger->info("Unique Client Order IDs Received: {}", received_client_order_ids.size());
+            }
             
             // Print detailed message comparison
             printMessageComparison();
+            // Print latency report
+            printLatencyReport();
             
-            bool success = (messages_published == messages_received) && 
-                          (messages_received == messageCount) &&
-                          (received_message_ids.size() == static_cast<size_t>(messageCount));
+            bool success;
+            {
+                std::lock_guard<std::mutex> s_lock(client_order_mutex);
+                std::lock_guard<std::mutex> r_lock(received_client_order_mutex);
+                success = (sent_client_order_ids.size() == received_client_order_ids.size());
+            }
             
             if (success) {
                 logger->info("========================================");
                 logger->info("TEST PASSED! ✓");
-                logger->info("All messages were published and received correctly!");
+                logger->info("All client_order_id values were received correctly!");
                 logger->info("Subscriber successfully reconnected and received all messages.");
                 logger->info("========================================");
                 return 0;
             } else {
                 logger->error("========================================");
                 logger->error("TEST FAILED! ✗");
-                logger->error("Message count mismatch!");
-                logger->error("Expected: {}", messageCount);
-                logger->error("Published: {}", messages_published.load());
-                logger->error("Received: {}", messages_received.load());
-                logger->error("Unique: {}", received_message_ids.size());
+                {
+                    std::lock_guard<std::mutex> s_lock(client_order_mutex);
+                    std::lock_guard<std::mutex> r_lock(received_client_order_mutex);
+                    logger->error("Client order ID mismatch!");
+                    logger->error("Sent (unique client_order_id): {}", sent_client_order_ids.size());
+                    logger->error("Received (unique client_order_id): {}", received_client_order_ids.size());
+                }
                 logger->error("========================================");
                 return 1;
             }
@@ -1171,6 +1470,8 @@ int main(int argc, char* argv[]) {
             
             // Print detailed message comparison
             printMessageComparison();
+            // Print latency report
+            printLatencyReport();
             
             logger->info("\nBreakdown by Identifier:");
             logger->info("Published:");

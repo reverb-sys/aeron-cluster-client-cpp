@@ -103,9 +103,16 @@ class ClusterClient::Impl {
 
         session_manager_->set_connection_state_callback(
             [this](bool connected) { this->on_session_connection_state_changed(connected); });
+
+        ack_flush_running_.store(true);
+        ack_flush_thread_ = std::thread([this]() { ack_flush_loop(); });
     }
 
     ~Impl() {
+        ack_flush_running_.store(false);
+        if (ack_flush_thread_.joinable()) {
+            ack_flush_thread_.join();
+        }
         try {
             stop_polling();
             disconnect();
@@ -177,6 +184,7 @@ class ClusterClient::Impl {
             // Resume from last commit for subscribed topics
             resume_subscribed_topics();
 
+            clear_driver_error_state();
             set_connection_state(ConnectionState::CONNECTED);
             return true;
 
@@ -266,10 +274,19 @@ class ClusterClient::Impl {
         return session_manager_ ? session_manager_->get_leader_member_id() : -1;
     }
 
-    std::string publish_order(const Order& order) {
+    void ensure_connected_or_throw() const {
+        throw_if_driver_terminated();
         if (!is_connected()) {
             throw NotConnectedException();
         }
+    }
+
+    void check_driver_health() const {
+        throw_if_driver_terminated();
+    }
+
+    std::string publish_order(const Order& order) {
+        ensure_connected_or_throw();
 
         auto validation_errors = order.validate();
         if (!validation_errors.empty()) {
@@ -303,9 +320,7 @@ class ClusterClient::Impl {
     }
 
     std::string publish_order_to_topic(const Order& order, const std::string& topic) {
-        if (!is_connected()) {
-            throw NotConnectedException();
-        }
+        ensure_connected_or_throw();
 
         if (topic.empty()) {
             throw InvalidMessageException("Topic is empty");
@@ -353,9 +368,7 @@ class ClusterClient::Impl {
 
     std::string publish_message(const std::string& message_type, const std::string& payload,
                                 const std::string& headers) {
-        if (!is_connected()) {
-            throw NotConnectedException();
-        }
+        ensure_connected_or_throw();
 
         std::string message_id = OrderUtils::generate_message_id("msg");
 
@@ -370,9 +383,7 @@ class ClusterClient::Impl {
 
     std::string publish_message_to_topic(const std::string& message_type, const std::string& payload,
         const std::string& headers, const std::string& topic) {
-        if (!is_connected()) {
-        throw NotConnectedException();
-        }
+        ensure_connected_or_throw();
 
         if (topic.empty()) {
             throw InvalidMessageException("Topic is empty");
@@ -412,9 +423,7 @@ class ClusterClient::Impl {
             DEBUG_LOG("send_subscription_request called: topic=", topic, " messageIdentifier=", messageIdentifier, 
                      " resumeStrategy=", resumeStrategy, " instanceIdentifier=", instanceIdentifier);
         }
-        if (!is_connected()) {
-            throw NotConnectedException();
-        }
+        ensure_connected_or_throw();
 
         std::string message_id = OrderUtils::generate_message_id("msg");
         std::string message_type = "SUBSCRIBE";
@@ -551,9 +560,7 @@ class ClusterClient::Impl {
     }
 
     std::string send_unsubscription_request(const std::string& topic, const std::string& messageIdentifier = "") {
-        if (!is_connected()) {
-            throw NotConnectedException();
-        }
+        ensure_connected_or_throw();
 
         std::string message_id = OrderUtils::generate_message_id("msg");
         std::string message_type = "UNSUBSCRIBE";
@@ -611,8 +618,17 @@ class ClusterClient::Impl {
     }
 
     bool send_commit_request(const std::string& topic) {
+        throw_if_driver_terminated();
         if (!is_connected() || !commit_manager_) {
             return false;
+        }
+
+        if (config_.commit_log_enabled) {
+            if (logger_) {
+                logger_->info("COMMIT-LOG: send_commit_request topic={}", topic);
+            } else {
+                std::cout << "[COMMIT-LOG] send_commit_request topic=" << topic << std::endl;
+            }
         }
 
         auto frame = commit_manager_->build_commit_message(topic, config_.client_id);
@@ -620,6 +636,7 @@ class ClusterClient::Impl {
     }
 
     bool send_commit_offset(const std::string& topic, const CommitOffset& offset) {
+        throw_if_driver_terminated();
         if (config_.debug_logging) {
             DEBUG_LOG("send_commit_offset called: is_connected=", is_connected(), 
                      " has_commit_manager=", (commit_manager_ != nullptr),
@@ -641,6 +658,14 @@ class ClusterClient::Impl {
         // to include the session envelope wrapper that the cluster expects
         bool result = session_manager_->send_combined_message(frame);
         
+        if (config_.commit_log_enabled) {
+            if (logger_) {
+                logger_->info("COMMIT-LOG: send_commit_offset topic={}", topic);
+            } else {
+                std::cout << "[COMMIT-LOG] send_commit_offset topic=" << topic << std::endl;
+            }
+        }
+
         if (config_.debug_logging) {
             DEBUG_LOG("send_commit_offset result: ", result, " session_id: ", get_session_id());
         }
@@ -649,6 +674,7 @@ class ClusterClient::Impl {
     }
 
     bool resume_from_last_commit(const std::string& topic, const std::string& message_identifier) {
+        throw_if_driver_terminated();
         if (!is_connected() || !commit_manager_) {
             return false;
         }
@@ -925,6 +951,9 @@ class ClusterClient::Impl {
     std::atomic<bool> reconnect_in_progress_{false};
     std::atomic<bool> disconnect_notified_{false};
     std::atomic<bool> suppress_disconnect_notifications_{false};
+    std::atomic<bool> fatal_error_detected_{false};
+    mutable std::mutex fatal_error_mutex_;
+    std::string fatal_error_message_;
 
     // Callbacks
     MessageCallback message_callback_;
@@ -950,10 +979,17 @@ class ClusterClient::Impl {
     std::unordered_set<std::string> subscribed_topics_;
     mutable std::mutex topics_mutex_;
 
+    // Cumulative ACK tracking
+    std::unordered_map<std::string, AckState> ack_states_;
+    std::mutex ack_mutex_;
+    std::thread ack_flush_thread_;
+    std::atomic<bool> ack_flush_running_{false};
+
     bool initialize_aeron() {
         try {
             aeron::Context context;
             context.aeronDir(config_.aeron_dir);
+            configure_aeron_context(context);
             
             // Note: Aeron doesn't have client-side keepalive configuration in Context
             // Keepalive is handled at the Media Driver level on the server side
@@ -964,6 +1000,68 @@ class ClusterClient::Impl {
             DEBUG_LOG("Aeron initialization error: ", e.what());
             return false;
         }
+    }
+
+    void configure_aeron_context(aeron::Context& context) {
+        context.errorHandler([this](const std::exception& e) {
+            this->handle_aeron_error(e);
+        });
+    }
+
+    void handle_aeron_error(const std::exception& e) {
+        const std::string message = e.what();
+        {
+            std::lock_guard<std::mutex> lock(fatal_error_mutex_);
+            fatal_error_message_ = message;
+        }
+
+        bool expected = false;
+        if (!fatal_error_detected_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+
+        if (logger_) {
+            logger_->error("Aeron MediaDriver error detected: {}", message);
+        } else {
+            std::cerr << "[ClusterClient] Aeron MediaDriver error detected: " << message << std::endl;
+        }
+
+        try {
+            stop_polling();
+            if (session_manager_) {
+                session_manager_->disconnect();
+            }
+        } catch (const std::exception& cleanup_error) {
+            if (config_.debug_logging) {
+                DEBUG_LOG("Cleanup after Aeron error failed: ", cleanup_error.what());
+            }
+        }
+
+        notify_connection_loss("Aeron MediaDriver error: " + message, false);
+    }
+
+    void throw_if_driver_terminated() const {
+        if (!fatal_error_detected_.load()) {
+            return;
+        }
+
+        std::string message;
+        {
+            std::lock_guard<std::mutex> lock(fatal_error_mutex_);
+            message = fatal_error_message_;
+        }
+
+        if (message.empty()) {
+            message = "MediaDriver is no longer available";
+        }
+
+        throw ClusterClientException("Aeron driver failure: " + message);
+    }
+
+    void clear_driver_error_state() {
+        fatal_error_detected_.store(false);
+        std::lock_guard<std::mutex> lock(fatal_error_mutex_);
+        fatal_error_message_.clear();
     }
 
     bool create_egress_subscription() {
@@ -1090,13 +1188,9 @@ class ClusterClient::Impl {
                     std::uint64_t timestamp_nanos = result.timestamp;
                     std::uint64_t sequence_number = result.sequence_number;
                     
-                    // Commit locally
-                    commit_manager_->commit_message(topic, message_identifier, result.message_id, 
-                                                   timestamp_nanos, sequence_number);
-                    
-                    // Send commit offset to server asynchronously
-                    send_commit_offset_async(topic, message_identifier, result.message_id, 
-                                           timestamp_nanos, sequence_number);
+                    CommitOffset offset(topic, message_identifier, result.message_id,
+                                        timestamp_nanos, sequence_number);
+                    buffer_ack(offset);
                     
                     if (config_.debug_logging) {
                         DEBUG_LOG("Message processed and committed successfully for topic: ", topic);
@@ -1572,6 +1666,11 @@ std::future<bool> ClusterClient::reconnect_async() {
 std::string ClusterClient::publish_topic(std::string_view topic, std::string_view message_type,
                                          std::string_view json_payload,
                                          std::string_view headers_json) {
+    pImpl_->check_driver_health();
+    if (!is_connected()) {
+        throw NotConnectedException();
+    }
+
     // Correlation UUID
     std::string uuid = std::string("pub_") + std::to_string(now_nanos());
 
@@ -1703,7 +1802,12 @@ bool ClusterClient::offer_ingress(const std::uint8_t* data, std::size_t len) {
     // In a real implementation, this would use the session manager to offer the message
     (void)data;  // Suppress unused parameter warning
     (void)len;   // Suppress unused parameter warning
-    if (pImpl_ && pImpl_->is_connected()) {
+    if (!pImpl_) {
+        return false;
+    }
+
+    pImpl_->check_driver_health();
+    if (pImpl_->is_connected()) {
         // Use the session manager to publish the message
         // For now, return true as a placeholder
         return true;
@@ -1916,6 +2020,11 @@ ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_keepalive_interval(
 
 ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_debug_logging(bool enabled) {
     config_.debug_logging = enabled;
+    return *this;
+}
+
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_commit_logging(bool enabled) {
+    config_.commit_log_enabled = enabled;
     return *this;
 }
 
