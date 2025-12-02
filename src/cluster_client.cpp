@@ -103,16 +103,10 @@ class ClusterClient::Impl {
 
         session_manager_->set_connection_state_callback(
             [this](bool connected) { this->on_session_connection_state_changed(connected); });
-
-        ack_flush_running_.store(true);
-        ack_flush_thread_ = std::thread([this]() { ack_flush_loop(); });
     }
 
     ~Impl() {
-        ack_flush_running_.store(false);
-        if (ack_flush_thread_.joinable()) {
-            ack_flush_thread_.join();
-        }
+       
         try {
             stop_polling();
             disconnect();
@@ -979,11 +973,6 @@ class ClusterClient::Impl {
     std::unordered_set<std::string> subscribed_topics_;
     mutable std::mutex topics_mutex_;
 
-    // Cumulative ACK tracking
-    std::unordered_map<std::string, AckState> ack_states_;
-    std::mutex ack_mutex_;
-    std::thread ack_flush_thread_;
-    std::atomic<bool> ack_flush_running_{false};
 
     bool initialize_aeron() {
         try {
@@ -1188,9 +1177,13 @@ class ClusterClient::Impl {
                     std::uint64_t timestamp_nanos = result.timestamp;
                     std::uint64_t sequence_number = result.sequence_number;
                     
-                    CommitOffset offset(topic, message_identifier, result.message_id,
-                                        timestamp_nanos, sequence_number);
-                    buffer_ack(offset);
+                    // Commit locally
+                    commit_manager_->commit_message(topic, message_identifier, result.message_id, 
+                        timestamp_nanos, sequence_number);
+
+                    // Send commit offset to server asynchronously
+                    send_commit_offset_async(topic, message_identifier, result.message_id, 
+                                    timestamp_nanos, sequence_number);
                     
                     if (config_.debug_logging) {
                         DEBUG_LOG("Message processed and committed successfully for topic: ", topic);
