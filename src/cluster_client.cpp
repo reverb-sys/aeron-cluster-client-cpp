@@ -600,13 +600,7 @@ class ClusterClient::Impl {
                        std::uint64_t sequence_number) {
         if (commit_manager_) {
             commit_manager_->commit_message(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
-            if (config_.commit_log_enabled) {
-                if (logger_) {
-                    logger_->info("COMMIT-LOG: commit_message topic={}", topic);
-                } else {
-                    std::cout << "[COMMIT-LOG] commit_message topic=" << topic << std::endl;
-                }
-            }
+            send_commit_offset(topic, CommitOffset(topic, message_identifier, message_id, timestamp_nanos, sequence_number));
         }
     }
 
@@ -661,9 +655,9 @@ class ClusterClient::Impl {
         
         if (config_.commit_log_enabled) {
             if (logger_) {
-                logger_->info("COMMIT-LOG: send_commit_offset topic={}", topic);
+                logger_->info("COMMIT-LOG: send_commit_offset topic={}, message_identifier={}, message_id={}, timestamp_nanos={}, sequence_number={}", topic, offset.message_identifier, offset.message_id, offset.timestamp_nanos, offset.sequence_number);
             } else {
-                std::cout << "[COMMIT-LOG] send_commit_offset topic=" << topic << std::endl;
+                std::cout << "[COMMIT-LOG] send_commit_offset topic=" << topic << ", message_identifier=" << offset.message_identifier << ", message_id=" << offset.message_id << ", timestamp_nanos=" << offset.timestamp_nanos << ", sequence_number=" << offset.sequence_number << std::endl;
             }
         }
 
@@ -1185,12 +1179,14 @@ class ClusterClient::Impl {
                     std::uint64_t sequence_number = result.sequence_number;
                     
                     // Commit locally
-                    commit_manager_->commit_message(topic, message_identifier, result.message_id, 
-                        timestamp_nanos, sequence_number);
+                    // commit_manager_->commit_message(topic, message_identifier, result.message_id, 
+                    //     timestamp_nanos, sequence_number);
+
+                    commit_message(topic, message_identifier, result.message_id, timestamp_nanos, sequence_number);
 
                     // Send commit offset to server asynchronously
-                    send_commit_offset_async(topic, message_identifier, result.message_id, 
-                                    timestamp_nanos, sequence_number);
+                    // CommitOffset offset(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
+                    // send_commit_offset(topic, offset);
                     
                     if (config_.debug_logging) {
                         DEBUG_LOG("Message processed and committed successfully for topic: ", topic);
