@@ -66,6 +66,7 @@ struct ClusterClientConfig {
     
     // Commit logging
     bool commit_log_enabled = false;
+    bool enable_auto_commit = true;
 
     /**
      * @brief Validate configuration parameters

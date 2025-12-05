@@ -441,6 +441,7 @@ public:
     ClusterClientConfigBuilder& with_keepalive_interval(std::chrono::milliseconds interval);
     ClusterClientConfigBuilder& with_debug_logging(bool enabled);
     ClusterClientConfigBuilder& with_commit_logging(bool enabled);
+    ClusterClientConfigBuilder& with_auto_commit(bool enabled);
     ClusterClientConfigBuilder& with_application_name(const std::string& name);
     ClusterClientConfigBuilder& with_default_topic(const std::string& topic);
     ClusterClientConfigBuilder& with_client_id(const std::string& client_id);
