@@ -1182,7 +1182,9 @@ class ClusterClient::Impl {
                     // commit_manager_->commit_message(topic, message_identifier, result.message_id, 
                     //     timestamp_nanos, sequence_number);
 
-                    commit_message(topic, message_identifier, result.message_id, timestamp_nanos, sequence_number);
+                    if (config_.enable_auto_commit) {
+                        commit_message(topic, message_identifier, result.message_id, timestamp_nanos, sequence_number);
+                    }
 
                     // Send commit offset to server asynchronously
                     // CommitOffset offset(topic, message_identifier, message_id, timestamp_nanos, sequence_number);
@@ -2021,6 +2023,11 @@ ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_debug_logging(bool 
 
 ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_commit_logging(bool enabled) {
     config_.commit_log_enabled = enabled;
+    return *this;
+}
+
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_auto_commit(bool enabled) {
+    config_.enable_auto_commit = enabled;
     return *this;
 }
 
