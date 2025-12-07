@@ -149,6 +149,18 @@ public:
     bool send_keepalive();
 
     /**
+     * @brief Get the last Aeron publication error code observed when offering to ingress.
+     * @return Negative Aeron error code or 0 if the last offer succeeded.
+     */
+    std::int64_t get_last_publication_error_code() const;
+
+    /**
+     * @brief Get the human-readable description for the last Aeron publication error.
+     * @return Description string or empty if the last offer succeeded.
+     */
+    std::string get_last_publication_error_message() const;
+
+    /**
      * @brief Handle incoming session event
      * @param result Parsed session event
      */

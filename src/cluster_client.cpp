@@ -275,6 +275,24 @@ class ClusterClient::Impl {
         }
     }
 
+    std::string build_publish_failure_message(const std::string& base_message) const {
+        if (!session_manager_) {
+            return base_message;
+        }
+
+        std::string detail = session_manager_->get_last_publication_error_message();
+        if (!detail.empty()) {
+            return base_message + ": " + detail;
+        }
+
+        std::int64_t code = session_manager_->get_last_publication_error_code();
+        if (code != 0) {
+            return base_message + ": Aeron code " + std::to_string(code);
+        }
+
+        return base_message;
+    }
+
     void check_driver_health() const {
         throw_if_driver_terminated();
     }
@@ -306,7 +324,8 @@ class ClusterClient::Impl {
 
         if (!session_manager_->publish_message(config_.default_topic, message_type, message_id,
                                                order_json, headers_json)) {
-            throw ClusterClientException("Failed to publish order message");
+            throw ClusterClientException(
+                build_publish_failure_message("Failed to publish order message"));
         }
 
         stats_.messages_sent++;
@@ -344,7 +363,8 @@ class ClusterClient::Impl {
 
         if (!session_manager_->publish_message(topic, message_type, message_id,
                                                order_json, headers_json)) {
-            throw ClusterClientException("Failed to publish order message");
+            throw ClusterClientException(
+                build_publish_failure_message("Failed to publish order message"));
         }
 
         stats_.messages_sent++;
@@ -368,7 +388,8 @@ class ClusterClient::Impl {
 
         if (!session_manager_->publish_message(config_.default_topic, message_type, message_id,
                                                payload, headers)) {
-            throw ClusterClientException("Failed to publish message");
+            throw ClusterClientException(
+                build_publish_failure_message("Failed to publish message"));
         }
 
         stats_.messages_sent++;
@@ -386,8 +407,9 @@ class ClusterClient::Impl {
         std::string message_id = OrderUtils::generate_message_id("msg");
 
         if (!session_manager_->publish_message(topic, message_type, message_id,
-                            payload, headers)) {
-        throw ClusterClientException("Failed to publish message");
+                                               payload, headers)) {
+            throw ClusterClientException(
+                build_publish_failure_message("Failed to publish message"));
         }
 
         stats_.messages_sent++;
@@ -447,7 +469,8 @@ class ClusterClient::Impl {
 
         if (!session_manager_->publish_message("_subscriptions", message_type, message_id,
                                                payload_json, headers_json)) {
-            throw ClusterClientException("Failed to send subscription request");
+            throw ClusterClientException(
+                build_publish_failure_message("Failed to send subscription request"));
         }
 
         // Track subscribed topic
@@ -462,6 +485,8 @@ class ClusterClient::Impl {
                 DEBUG_LOG("Stored instance identifier for topic ", topic, ": ", effective_instance_id);
             }
         }
+
+        track_subscription(topic, messageIdentifier, resumeStrategy, effective_instance_id);
 
         stats_.messages_sent++;
         return message_id;
@@ -579,7 +604,8 @@ class ClusterClient::Impl {
 
         if (!session_manager_->publish_message("_subscriptions", message_type, message_id,
                                                payload_json, headers_json)) {
-            throw ClusterClientException("Failed to send unsubscription request");
+            throw ClusterClientException(
+                build_publish_failure_message("Failed to send unsubscription request"));
         }
 
         // Remove topic from tracking
@@ -590,6 +616,8 @@ class ClusterClient::Impl {
             std::lock_guard<std::mutex> lock(subscription_mutex_);
             subscription_message_identifiers_.erase(topic);
         }
+
+        untrack_subscription(topic, messageIdentifier);
 
         stats_.messages_sent++;
         return message_id;
@@ -883,38 +911,63 @@ class ClusterClient::Impl {
 
     // Resume subscribed topics from last commit
     void resume_subscribed_topics() {
-        std::lock_guard<std::mutex> lock(topics_mutex_);
-        
-        for (const auto& topic : subscribed_topics_) {
-            if (config_.debug_logging) {
-                DEBUG_LOG("Resuming subscription for topic: ", topic);
+        std::vector<SubscriptionRecord> subscriptions;
+        {
+            std::lock_guard<std::mutex> lock(tracked_subscriptions_mutex_);
+            subscriptions.reserve(tracked_subscriptions_.size());
+            for (const auto& entry : tracked_subscriptions_) {
+                subscriptions.push_back(entry.second);
             }
-            
-            // Get the stored message identifier for this topic
-            std::string message_identifier = config_.client_id; // fallback to default
-            {
-                std::lock_guard<std::mutex> sub_lock(subscription_mutex_);
-                auto it = subscription_message_identifiers_.find(topic);
-                if (it != subscription_message_identifiers_.end()) {
-                    message_identifier = it->second;
+        }
+
+        if (subscriptions.empty()) {
+            std::lock_guard<std::mutex> lock(topics_mutex_);
+            subscriptions.reserve(subscribed_topics_.size());
+            for (const auto& topic : subscribed_topics_) {
+                SubscriptionRecord record;
+                record.topic = topic;
+                {
+                    std::lock_guard<std::mutex> sub_lock(subscription_mutex_);
+                    auto it = subscription_message_identifiers_.find(topic);
+                    record.message_identifier = (it != subscription_message_identifiers_.end())
+                        ? it->second
+                        : config_.client_id;
                 }
+                record.resume_strategy = "LATEST";
+                record.instance_identifier = config_.instance_identifier;
+                subscriptions.push_back(record);
             }
-            
-            // Get the last commit for this topic with the correct message identifier
-            auto last_commit = commit_manager_->get_last_commit(topic, message_identifier);
+        }
+
+        for (const auto& sub : subscriptions) {
+            if (config_.debug_logging) {
+                DEBUG_LOG("Resuming subscription for topic: ", sub.topic,
+                          " identifier: ", sub.message_identifier,
+                          " resumeStrategy: ", sub.resume_strategy,
+                          " instance: ", sub.instance_identifier);
+            }
+
+            std::shared_ptr<CommitOffset> last_commit;
+            if (commit_manager_) {
+                last_commit = commit_manager_->get_last_commit(sub.topic, sub.message_identifier);
+            }
+
             if (last_commit) {
-                // Resume from last commit
-                if (send_commit_offset(topic, *last_commit)) {
-                    DEBUG_LOG("Resumed from last commit for topic: ", topic, " messageID: ", last_commit->message_id);
-                } else {
-                    DEBUG_LOG("Failed to send commit offset for topic: ", topic);
+                if (!send_commit_offset(sub.topic, *last_commit) && config_.debug_logging) {
+                    DEBUG_LOG("Failed to send commit offset for topic: ", sub.topic);
                 }
             } else {
-                // No previous commit, subscribe from latest
-                if (send_subscription_request(topic, message_identifier, "LATEST") != "") {
-                    DEBUG_LOG("Subscribed to topic from latest: ", topic);
-                } else {
-                    DEBUG_LOG("Failed to subscribe to topic: ", topic);
+                try {
+                    send_subscription_request(sub.topic, sub.message_identifier, sub.resume_strategy, sub.instance_identifier);
+                } catch (const std::exception& e) {
+                    if (logger_) {
+                        logger_->warn("Failed to re-subscribe to topic {} (identifier={}): {}",
+                                      sub.topic, sub.message_identifier, e.what());
+                    } else {
+                        std::cerr << "[cluster_client] Failed to re-subscribe to topic "
+                                  << sub.topic << " identifier=" << sub.message_identifier
+                                  << " reason=" << e.what() << std::endl;
+                    }
                 }
             }
         }
@@ -930,6 +983,38 @@ class ClusterClient::Impl {
     void remove_subscribed_topic(const std::string& topic) {
         std::lock_guard<std::mutex> lock(topics_mutex_);
         subscribed_topics_.erase(topic);
+    }
+
+    static std::string make_subscription_key(const std::string& topic,
+                                             const std::string& message_identifier,
+                                             const std::string& instance_identifier) {
+        return topic + "|" + message_identifier + "|" + instance_identifier;
+    }
+
+    void track_subscription(const std::string& topic,
+                            const std::string& message_identifier,
+                            const std::string& resume_strategy,
+                            const std::string& instance_identifier) {
+        SubscriptionRecord record{
+            topic,
+            message_identifier.empty() ? config_.client_id : message_identifier,
+            resume_strategy,
+            instance_identifier.empty() ? config_.instance_identifier : instance_identifier};
+
+        std::lock_guard<std::mutex> lock(tracked_subscriptions_mutex_);
+        tracked_subscriptions_[make_subscription_key(record.topic, record.message_identifier, record.instance_identifier)] = record;
+    }
+
+    void untrack_subscription(const std::string& topic, const std::string& message_identifier = "") {
+        std::lock_guard<std::mutex> lock(tracked_subscriptions_mutex_);
+        for (auto it = tracked_subscriptions_.begin(); it != tracked_subscriptions_.end();) {
+            const auto& rec = it->second;
+            if (rec.topic == topic && (message_identifier.empty() || rec.message_identifier == message_identifier)) {
+                it = tracked_subscriptions_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
    private:
@@ -973,6 +1058,16 @@ class ClusterClient::Impl {
     // Track subscribed topics for resume functionality
     std::unordered_set<std::string> subscribed_topics_;
     mutable std::mutex topics_mutex_;
+
+    struct SubscriptionRecord {
+        std::string topic;
+        std::string message_identifier;
+        std::string resume_strategy;
+        std::string instance_identifier;
+    };
+
+    std::unordered_map<std::string, SubscriptionRecord> tracked_subscriptions_;
+    mutable std::mutex tracked_subscriptions_mutex_;
 
 
     bool initialize_aeron() {
@@ -1107,10 +1202,10 @@ class ClusterClient::Impl {
                 }
 
                 // Check for message deduplication
+                bool already_processed = false;
                 if (!result.message_id.empty() && is_message_processed(result.message_id)) {
-                    // Message already processed, skip
-                    logger_->debug("Message already processed, skipping: ", result.message_id);
-                    // return;
+                    already_processed = true;
+                    logger_->debug("Message already processed, will re-ack and skip callback: ", result.message_id);
                 }
 
                 // Basic debug output to see if we reach this point
@@ -1127,16 +1222,20 @@ class ClusterClient::Impl {
                 
                 // Call the message callback for all successful messages
                 bool callback_success = false;
-                if (message_callback_) {
-                    try {
-                        message_callback_(result);
-                        callback_success = true;
-                    } catch (const std::exception& e) {
-                        DEBUG_LOG("Message callback failed: ", e.what());
-                        callback_success = false;
+                if (!already_processed) {
+                    if (message_callback_) {
+                        try {
+                            message_callback_(result);
+                            callback_success = true;
+                        } catch (const std::exception& e) {
+                            DEBUG_LOG("Message callback failed: ", e.what());
+                            callback_success = false;
+                        }
+                    } else {
+                        callback_success = true; // No callback means success
                     }
                 } else {
-                    callback_success = true; // No callback means success
+                    callback_success = true;
                 }
 
                 if (config_.debug_logging) {
@@ -1150,8 +1249,10 @@ class ClusterClient::Impl {
                     DEBUG_LOG("Commit check: callback_success=", callback_success, " should_skip=", should_skip, " has_commit_manager=", (commit_manager_ != nullptr), " has_message_id=", !result.message_id.empty());
                 }
                 if (callback_success && !should_skip && commit_manager_ && !result.message_id.empty()) {
-                    // Mark message as processed
-                    mark_message_processed(result.message_id);
+                    // Mark message as processed on first successful handling
+                    if (!already_processed) {
+                        mark_message_processed(result.message_id);
+                    }
                     
                     // Extract proper topic and message identifier from message
                     std::string topic = extract_topic_from_message(result);
@@ -1199,6 +1300,10 @@ class ClusterClient::Impl {
                     if (config_.debug_logging) {
                         DEBUG_LOG("Skipping auto-commit for control message: ", result.message_type);
                     }
+                }
+
+                if (already_processed) {
+                    return;
                 }
             } else {
                 DEBUG_LOG("Failed to parse message: ", result.error_message);
@@ -1412,8 +1517,11 @@ class ClusterClient::Impl {
         auto last_activity = std::chrono::steady_clock::now();
         auto connection_start_time = std::chrono::steady_clock::now();
         const auto health_check_interval = std::chrono::seconds(10); // Less frequent checks
-        const auto max_idle_time = std::chrono::seconds(60); // Longer idle timeout
+        const auto warning_timeout = config_.delivery_stall_warning_timeout;
+        const auto disconnect_timeout = config_.delivery_stall_disconnect_timeout;
+        const auto legacy_idle_timeout = std::chrono::seconds(60); // Backward compatible fallback
         const auto connection_grace_period = std::chrono::seconds(15); // Grace period for initial connection
+        auto last_stall_warning = std::chrono::steady_clock::time_point{};
         
         while (polling_active_.load()) {
             try {
@@ -1467,10 +1575,47 @@ class ClusterClient::Impl {
                     last_activity = now; // Update activity timestamp
                 } else {
                     // Check for idle timeout (only after grace period)
-                    if (!is_in_grace_period && (now - last_activity >= max_idle_time)) {
-                        DEBUG_LOG("Client idle for too long, disconnecting");
-                        notify_connection_loss("Client idle for too long");
-                        break;
+                    if (!is_in_grace_period) {
+                        const auto idle_duration = now - last_activity;
+                        const auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(idle_duration).count();
+                        const bool warning_enabled = warning_timeout.count() > 0;
+                        const bool disconnect_enabled = disconnect_timeout.count() > 0;
+
+                        if (warning_enabled && idle_duration >= warning_timeout) {
+                            if (last_stall_warning.time_since_epoch().count() == 0 ||
+                                (now - last_stall_warning) >= warning_timeout) {
+                                std::size_t pending_commits = 0;
+                                if (commit_manager_) {
+                                    pending_commits = commit_manager_->get_all_commits().size();
+                                }
+                                if (logger_) {
+                                    logger_->warn("Delivery stall warning: {} ms without cluster traffic (session_id={}, pending_commits_cached={})",
+                                                  idle_ms,
+                                                  get_session_id(),
+                                                  pending_commits);
+                                } else {
+                                    std::cerr << "[cluster_client] Delivery stall warning: "
+                                              << idle_ms << " ms without cluster traffic (session_id="
+                                              << get_session_id()
+                                              << ", pending_commits_cached=" << pending_commits << ")"
+                                              << std::endl;
+                                }
+                                last_stall_warning = now;
+                            }
+                        }
+
+                        if ((disconnect_enabled && idle_duration >= disconnect_timeout) ||
+                            (!disconnect_enabled && idle_duration >= legacy_idle_timeout)) {
+                            std::string reason = "Delivery stall detected (no cluster traffic for " +
+                                                 std::to_string(idle_ms) + " ms)";
+                            if (logger_) {
+                                logger_->warn("{}; forcing reconnect", reason);
+                            } else {
+                                std::cerr << "[cluster_client] " << reason << "; forcing reconnect" << std::endl;
+                            }
+                            notify_connection_loss(reason);
+                            break;
+                        }
                     }
                     std::this_thread::sleep_for(PerformanceConfig::POLL_INTERVAL);
                 }

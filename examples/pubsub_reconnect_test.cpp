@@ -36,6 +36,11 @@ std::set<std::string> received_message_ids;
 
 // Message comparison tracking
 std::set<std::string> duplicate_client_order_ids;
+std::mutex duplicate_delivery_mutex;
+std::unordered_map<std::string, int> duplicate_delivery_counts;
+
+constexpr int DUPLICATE_DELIVERY_RECONNECT_THRESHOLD = 5;
+std::atomic<bool> duplicate_reconnect_requested{false};
 
 constexpr auto INACTIVITY_TIMEOUT = std::chrono::seconds(30);
 std::atomic<long long> last_message_timestamp_ns{0};
@@ -58,6 +63,28 @@ long long pending_message_count() {
     const long long received = messages_received.load();
     const long long pending = published - received;
     return pending > 0 ? pending : 0;
+}
+
+void clear_duplicate_tracking() {
+    std::lock_guard<std::mutex> lock(duplicate_delivery_mutex);
+    duplicate_delivery_counts.clear();
+}
+
+void note_successful_delivery(const std::string& message_id) {
+    if (message_id.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(duplicate_delivery_mutex);
+    duplicate_delivery_counts.erase(message_id);
+}
+
+int record_duplicate_delivery(const std::string& message_id) {
+    if (message_id.empty()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(duplicate_delivery_mutex);
+    auto& count = duplicate_delivery_counts[message_id];
+    return ++count;
 }
 
 bool inactivity_timeout_reached() {
@@ -584,14 +611,34 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     // Ignore JSON parse errors; fall back to generic logging
                 }
                 
-                // Track received message
-                std::lock_guard<std::mutex> lock(message_mutex);
+                bool already_processed = false;
+                {
+                    std::lock_guard<std::mutex> lock(message_mutex);
+                    if (!result.message_id.empty()) {
+                        if (received_message_ids.find(result.message_id) == received_message_ids.end()) {
+                            received_message_ids.insert(result.message_id);
+                            note_successful_delivery(result.message_id);
+                        } else {
+                            already_processed = true;
+                        }
+                    }
+                    if (!already_processed) {
+                        messages_received++;
+                    }
+                }
                 
-                // Check if we've seen this message before
-                if (received_message_ids.find(result.message_id) == received_message_ids.end()) {
-                    received_message_ids.insert(result.message_id);
-                    messages_received++;
-                    
+                if (already_processed) {
+                    const auto duplicate_count = record_duplicate_delivery(result.message_id);
+                    if (duplicate_count >= DUPLICATE_DELIVERY_RECONNECT_THRESHOLD &&
+                        !duplicate_reconnect_requested.exchange(true)) {
+                        sub_logger->warn("Message {} has been re-delivered {} times without commit acknowledgement; forcing reconnect.", 
+                                         result.message_id.substr(0, 12), duplicate_count);
+                    }
+                    if (!extracted_client_order_id.empty()) {
+                        std::lock_guard<std::mutex> lock_rcv(received_client_order_mutex);
+                        received_client_order_ids.insert(extracted_client_order_id);
+                    }
+                } else {
                     bool duplicate_client_order = false;
                     if (!extracted_client_order_id.empty()) {
                         std::lock_guard<std::mutex> lock_rcv(received_client_order_mutex);
@@ -601,64 +648,60 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                             duplicate_client_order = true;
                         }
                     }
-                    
                     if (duplicate_client_order) {
                         sub_logger->warn("Duplicate ORDER detected for client_order_id={} (resp_msg_id={}...)", 
                                       extracted_client_order_id,
                                       result.message_id.substr(0, 12));
                     }
-                    
-                    if (!extracted_client_order_id.empty()) {
-                        bool was_sent = false;
-                        std::string sent_msg_id;
-                        {
-                            std::lock_guard<std::mutex> lock2(client_order_mutex);
-                            was_sent = sent_client_order_ids.find(extracted_client_order_id) != sent_client_order_ids.end();
-                            auto it = client_order_id_to_message_id.find(extracted_client_order_id);
-                            if (it != client_order_id_to_message_id.end()) {
-                                sent_msg_id = it->second;
-                            }
-                            // Compute latency if we have not recorded it yet and have a send time
-                            auto itSend = client_order_send_time.find(extracted_client_order_id);
-                            auto itLat = client_order_latency_ms.find(extracted_client_order_id);
-                            if (itSend != client_order_send_time.end() && itLat == client_order_latency_ms.end()) {
-                                auto now = std::chrono::steady_clock::now();
-                                client_order_receive_time[extracted_client_order_id] = now;
-                                long long latency_ms_val = std::chrono::duration_cast<std::chrono::milliseconds>(now - itSend->second).count();
-                                client_order_latency_ms[extracted_client_order_id] = latency_ms_val;
-                                client_order_id_to_response_message_id[extracted_client_order_id] = result.message_id;
-                                if (!extracted_order_id.empty()) {
-                                    client_order_id_to_order_id[extracted_client_order_id] = extracted_order_id;
-                                }
+                }
+                
+                if (!extracted_client_order_id.empty()) {
+                    bool was_sent = false;
+                    std::string sent_msg_id;
+                    {
+                        std::lock_guard<std::mutex> lock2(client_order_mutex);
+                        was_sent = sent_client_order_ids.find(extracted_client_order_id) != sent_client_order_ids.end();
+                        auto it = client_order_id_to_message_id.find(extracted_client_order_id);
+                        if (it != client_order_id_to_message_id.end()) {
+                            sent_msg_id = it->second;
+                        }
+                        // Compute latency if we have not recorded it yet and have a send time
+                        auto itSend = client_order_send_time.find(extracted_client_order_id);
+                        auto itLat = client_order_latency_ms.find(extracted_client_order_id);
+                        if (itSend != client_order_send_time.end() && itLat == client_order_latency_ms.end()) {
+                            auto now = std::chrono::steady_clock::now();
+                            client_order_receive_time[extracted_client_order_id] = now;
+                            long long latency_ms_val = std::chrono::duration_cast<std::chrono::milliseconds>(now - itSend->second).count();
+                            client_order_latency_ms[extracted_client_order_id] = latency_ms_val;
+                            client_order_id_to_response_message_id[extracted_client_order_id] = result.message_id;
+                            if (!extracted_order_id.empty()) {
+                                client_order_id_to_order_id[extracted_client_order_id] = extracted_order_id;
                             }
                         }
-                        if (was_sent) {
-                            long long latency_out = -1;
-                            auto itLat2 = client_order_latency_ms.find(extracted_client_order_id);
-                            if (itLat2 != client_order_latency_ms.end()) latency_out = itLat2->second;
-                            sub_logger->info("Received ORDER {}: client_order_id={} -> order_id={} (matched, req_msg_id={}..., resp_msg_id={}..., latencyMs={})", 
-                                          messages_received.load(),
-                                          extracted_client_order_id,
-                                          extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
-                                          sent_msg_id.empty() ? "<n/a>" : sent_msg_id.substr(0, 12),
-                                          result.message_id.substr(0, 12),
-                                          latency_out);
-                        } else {
-                            sub_logger->warn("Received ORDER {}: client_order_id={} not recognized (order_id={}, resp_msg_id={}...)", 
-                                          messages_received.load(),
-                                          extracted_client_order_id,
-                                          extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
-                                          result.message_id.substr(0, 12));
-                        }
+                    }
+                    if (was_sent) {
+                        long long latency_out = -1;
+                        auto itLat2 = client_order_latency_ms.find(extracted_client_order_id);
+                        if (itLat2 != client_order_latency_ms.end()) latency_out = itLat2->second;
+                        sub_logger->info("Received ORDER {}: client_order_id={} -> order_id={} (matched, req_msg_id={}..., resp_msg_id={}..., latencyMs={})", 
+                                      messages_received.load(),
+                                      extracted_client_order_id,
+                                      extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
+                                      sent_msg_id.empty() ? "<n/a>" : sent_msg_id.substr(0, 12),
+                                      result.message_id.substr(0, 12),
+                                      latency_out);
                     } else {
-                        sub_logger->info("Received ORDER message {}: Type={}, ID={}...", 
-                                      messages_received.load(), 
-                                      result.message_type, 
+                        sub_logger->warn("Received ORDER {}: client_order_id={} not recognized (order_id={}, resp_msg_id={}...)", 
+                                      messages_received.load(),
+                                      extracted_client_order_id,
+                                      extracted_order_id.empty() ? "<unknown>" : extracted_order_id,
                                       result.message_id.substr(0, 12));
                     }
                 } else {
-                    sub_logger->debug("Duplicate ORDER message detected (already received): {}...", 
-                                   result.message_id.substr(0, 12));
+                    sub_logger->info("Received ORDER message {}: Type={}, ID={}...", 
+                                  messages_received.load(), 
+                                  result.message_type, 
+                                  result.message_id.substr(0, 12));
                 }
             } else if (result.is_acknowledgment() || result.message_type == "Acknowledgment") {
                 // Log acknowledgments but don't count them
@@ -689,6 +732,8 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         
         while (running) {
             connection_attempt++;
+            clear_duplicate_tracking();
+            duplicate_reconnect_requested.store(false);
             
             // Generate a NEW instance ID for each connection attempt to avoid cluster rejecting reconnections
             // The cluster needs time to clean up the previous session with the same instance ID
@@ -793,6 +838,14 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     break; // Break to reconnect
                 }
+
+                if (duplicate_reconnect_requested.load()) {
+                    sub_logger->warn("Duplicate delivery threshold triggered, reconnecting subscriber to clear backlog.");
+                    duplicate_reconnect_requested.store(false);
+                    subscriber->disconnect();
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    break;
+                }
                 
                 // Check if we should disconnect intentionally
                 if (!disconnected_intentionally && messages_received >= disconnectAt) {
@@ -882,6 +935,8 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         }
         
         sub_logger->info("Subscriber finished! Total received: {}", messages_received.load());
+        clear_duplicate_tracking();
+        duplicate_reconnect_requested.store(false);
         
         // Disconnect
         if (subscriber->is_connected()) {
