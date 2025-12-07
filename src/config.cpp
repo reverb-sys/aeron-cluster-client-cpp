@@ -49,6 +49,17 @@ void ClusterClientConfig::validate() {
     if (keepalive_interval.count() <= 0) {
         throw std::invalid_argument("Keepalive interval must be positive");
     }
+
+    if (delivery_stall_warning_timeout.count() < 0 ||
+        delivery_stall_disconnect_timeout.count() < 0) {
+        throw std::invalid_argument("Delivery stall timeouts cannot be negative");
+    }
+
+    if (delivery_stall_warning_timeout.count() > 0 &&
+        delivery_stall_disconnect_timeout.count() > 0 &&
+        delivery_stall_warning_timeout > delivery_stall_disconnect_timeout) {
+        throw std::invalid_argument("Delivery stall warning timeout cannot exceed disconnect timeout");
+    }
 }
 
 bool ClusterClientConfig::needs_port_resolution(const std::string& channel) const {

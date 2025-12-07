@@ -68,6 +68,10 @@ struct ClusterClientConfig {
     bool commit_log_enabled = false;
     bool enable_auto_commit = true;
 
+    // Delivery stall detection (0 disables the respective guard)
+    std::chrono::milliseconds delivery_stall_warning_timeout{5000};
+    std::chrono::milliseconds delivery_stall_disconnect_timeout{15000};
+
     /**
      * @brief Validate configuration parameters
      * @throws std::invalid_argument if configuration is invalid

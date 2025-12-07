@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <regex>
 #include <set>
@@ -19,6 +20,23 @@
 using sbe::Acknowledgment;
 using sbe::MessageHeader;
 using sbe::TopicMessage;
+
+namespace {
+
+enum class OfferFailureCode {
+    None = 0,
+    NotConnected,
+    BackPressured,
+    AdminAction,
+    PublicationClosed,
+    MaxPositionExceeded,
+    DriverError,
+    Unknown
+};
+
+constexpr std::int64_t kAeronPublicationErrorCode = -6;
+
+}  // namespace
 
 namespace aeron_cluster {
 
@@ -35,7 +53,9 @@ class SessionManager::Impl {
           connected_(false),
           redirected_to_member_id_(-1),
           rng_(std::random_device{}()),
-          correlation_id_(generate_correlation_id()) {
+          correlation_id_(generate_correlation_id()),
+          stats_(),
+          last_offer_error_code_(0) {
         create_session_message_header_buffer();
         create_keepalive_buffer();
         if (config_.debug_logging) {
@@ -398,6 +418,7 @@ class SessionManager::Impl {
             std::int64_t result = ingress_publication_->offer(buffer, 0, encoded_message.size());
 
             if (result > 0) {
+                clear_last_publication_error();
                 stats_.messages_sent++;
                 stats_.last_message_time = std::chrono::steady_clock::now();
 
@@ -406,13 +427,10 @@ class SessionManager::Impl {
                               << " Message sent successfully, position: " << result << std::endl;
                 }
                 return true;
-            } else {
-                if (config_.debug_logging) {
-                    std::cout << config_.logging.log_prefix
-                              << " Failed to send message, result: " << result << std::endl;
-                }
-                return false;
             }
+
+            handle_offer_failure("Raw message offer", result);
+            return false;
 
         } catch (const std::exception& e) {
             if (config_.enable_console_errors) {
@@ -439,12 +457,17 @@ class SessionManager::Impl {
                 std::int64_t result = ingress_publication_->offer(buffer, 0, keepalive_buffer_.size());
 
                 if (result > 0) {
+                    clear_last_publication_error();
                     stats_.keepalives_sent++;
                     stats_.last_keepalive_time = std::chrono::steady_clock::now();
                     return true;
                 }
 
-                // If failed due to back pressure, use idle strategy (like Go)
+                OfferFailureCode failure_code = handle_offer_failure("Keepalive offer", result);
+                if (!is_transient_failure(failure_code)) {
+                    break;
+                }
+
                 if (i < 2) {  // Don't sleep on last attempt
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
@@ -525,7 +548,127 @@ class SessionManager::Impl {
         return stats_;
     }
 
+    std::int64_t get_last_publication_error_code() const {
+        return last_offer_error_code_.load();
+    }
+
+    std::string get_last_publication_error_message() const {
+        std::lock_guard<std::mutex> lock(last_offer_error_mutex_);
+        return last_offer_error_message_;
+    }
+
    private:
+    void clear_last_publication_error() {
+        last_offer_error_code_.store(0);
+        std::lock_guard<std::mutex> lock(last_offer_error_mutex_);
+        last_offer_error_message_.clear();
+    }
+
+    void update_last_publication_error(std::int64_t code, const std::string& message) {
+        last_offer_error_code_.store(code);
+        std::lock_guard<std::mutex> lock(last_offer_error_mutex_);
+        last_offer_error_message_ = message;
+    }
+
+    OfferFailureCode classify_offer_failure(std::int64_t result) const {
+        if (result > 0) {
+            return OfferFailureCode::None;
+        }
+
+        switch (result) {
+            case aeron::NOT_CONNECTED:
+                return OfferFailureCode::NotConnected;
+            case aeron::BACK_PRESSURED:
+                return OfferFailureCode::BackPressured;
+            case aeron::ADMIN_ACTION:
+                return OfferFailureCode::AdminAction;
+            case aeron::PUBLICATION_CLOSED:
+                return OfferFailureCode::PublicationClosed;
+            case aeron::MAX_POSITION_EXCEEDED:
+                return OfferFailureCode::MaxPositionExceeded;
+            case kAeronPublicationErrorCode:
+                return OfferFailureCode::DriverError;
+            default:
+                return OfferFailureCode::Unknown;
+        }
+    }
+
+    std::string describe_offer_failure(std::int64_t result) const {
+        switch (result) {
+            case aeron::NOT_CONNECTED:
+                return "AERON_PUBLICATION_NOT_CONNECTED (-1): ingress publication is not connected";
+            case aeron::BACK_PRESSURED:
+                return "AERON_PUBLICATION_BACK_PRESSURED (-2): subscribers are applying back pressure";
+            case aeron::ADMIN_ACTION:
+                return "AERON_PUBLICATION_ADMIN_ACTION (-3): driver administration is in progress";
+            case aeron::PUBLICATION_CLOSED:
+                return "AERON_PUBLICATION_CLOSED (-4): publication is closed and must be recreated";
+            case aeron::MAX_POSITION_EXCEEDED:
+                return "AERON_PUBLICATION_MAX_POSITION_EXCEEDED (-5): publication reached its maximum position";
+            case kAeronPublicationErrorCode:
+                return "AERON_PUBLICATION_ERROR (-6): driver reported a publication error";
+            case 0:
+                return "Offer returned 0: publication is not ready for the message yet";
+            default:
+                return "Unknown Aeron publication status (" + std::to_string(result) + ")";
+        }
+    }
+
+    bool is_transient_failure(OfferFailureCode code) const {
+        return code == OfferFailureCode::BackPressured || code == OfferFailureCode::AdminAction;
+    }
+
+    bool is_connection_loss_failure(OfferFailureCode code) const {
+        switch (code) {
+            case OfferFailureCode::NotConnected:
+            case OfferFailureCode::PublicationClosed:
+            case OfferFailureCode::MaxPositionExceeded:
+            case OfferFailureCode::DriverError:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void handle_connection_loss(const std::string& reason) {
+        bool was_connected = connected_.exchange(false);
+        if (!was_connected) {
+            return;
+        }
+
+        if (config_.enable_console_errors || config_.enable_console_warnings) {
+            std::ostream& stream = config_.enable_console_errors ? std::cerr : std::cout;
+            stream << config_.logging.log_prefix << " Connection lost: " << reason << std::endl;
+        }
+
+        if (connection_state_callback_) {
+            connection_state_callback_(false);
+        }
+    }
+
+    OfferFailureCode handle_offer_failure(const std::string& context, std::int64_t result) {
+        OfferFailureCode code = classify_offer_failure(result);
+
+        if (code == OfferFailureCode::None) {
+            clear_last_publication_error();
+            return code;
+        }
+
+        std::string description = describe_offer_failure(result);
+        update_last_publication_error(result, description);
+
+        if (config_.enable_console_errors || config_.enable_console_warnings || config_.debug_logging) {
+            std::ostream& stream = config_.enable_console_errors ? std::cerr : std::cout;
+            stream << config_.logging.log_prefix << context << " failed: " << description << std::endl;
+        }
+
+        if (is_connection_loss_failure(code)) {
+            handle_connection_loss(description);
+        }
+
+        return code;
+    }
+
     ClusterClientConfig config_;
     std::shared_ptr<aeron::Aeron> aeron_;
     std::shared_ptr<aeron::ExclusivePublication> ingress_publication_;
@@ -538,10 +681,14 @@ class SessionManager::Impl {
     std::mt19937 rng_;
     std::int64_t correlation_id_;
     SessionStats stats_;
+    std::atomic<std::int64_t> last_offer_error_code_;
+    std::string last_offer_error_message_;
+    mutable std::mutex last_offer_error_mutex_;
     SessionEventCallback session_event_callback_;
     ConnectionStateCallback connection_state_callback_;
     std::vector<std::uint8_t> session_header_buffer_;  // Pre-built like Go client
     std::vector<std::uint8_t> keepalive_buffer_;  // Pre-built keepalive buffer like Go keepAliveBuffer
+    mutable std::mutex send_mutex_;
 
     // ---- Connection management methods ----
 
@@ -705,18 +852,16 @@ class SessionManager::Impl {
             std::int64_t result = ingress_publication_->offer(buffer, 0, encoded_message.size());
 
             if (result > 0) {
+                clear_last_publication_error();
                 if (config_.debug_logging) {
                     std::cout << config_.logging.log_prefix
                               << " SessionConnectRequest sent successfully" << std::endl;
                 }
                 return true;
-            } else {
-                if (config_.enable_console_errors) {
-                    std::cerr << config_.logging.log_prefix
-                              << " Failed to send SessionConnectRequest: " << result << std::endl;
-                }
-                return false;
             }
+
+            handle_offer_failure("SessionConnectRequest offer", result);
+            return false;
 
         } catch (const std::exception& e) {
             if (config_.enable_console_errors) {
@@ -916,6 +1061,15 @@ class SessionManager::Impl {
             return false;
         }
 
+        std::lock_guard<std::mutex> lock(send_mutex_);
+
+        // Existing code…
+        if (!is_connected()) {
+            //log this for debugging now
+            std::cout << config_.logging.log_prefix << " Not connected, cannot send combined message" << std::endl;
+            return false;
+        }
+
         try {
             // Create single buffer: SessionHeader (32 bytes) + BusinessMessage
             size_t total_size = session_header_buffer_.size() + business_message.size();
@@ -966,6 +1120,7 @@ class SessionManager::Impl {
                 buffer, 0, static_cast<aeron::util::index_t>(combined_buffer.size()));
 
             if (result > 0) {
+                clear_last_publication_error();
                 stats_.messages_sent++;
                 stats_.last_message_time = std::chrono::steady_clock::now();
 
@@ -975,13 +1130,10 @@ class SessionManager::Impl {
                               << std::endl;
                 }
                 return true;
-            } else {
-                if (config_.debug_logging) {
-                    std::cout << config_.logging.log_prefix
-                              << " Combined message send failed, result: " << result << std::endl;
-                }
-                return false;
             }
+
+            handle_offer_failure("Combined message offer", result);
+            return false;
 
         } catch (const std::exception& e) {
             if (config_.enable_console_errors) {
@@ -1235,6 +1387,14 @@ bool SessionManager::send_combined_message(const std::vector<std::uint8_t>& busi
 
 bool SessionManager::send_keepalive() {
     return pImpl_->send_keepalive();
+}
+
+std::int64_t SessionManager::get_last_publication_error_code() const {
+    return pImpl_->get_last_publication_error_code();
+}
+
+std::string SessionManager::get_last_publication_error_message() const {
+    return pImpl_->get_last_publication_error_message();
 }
 
 void SessionManager::handle_session_event(const ParseResult& result) {
