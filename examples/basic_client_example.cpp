@@ -141,6 +141,7 @@ bool testClusterConnectivity(const std::vector<std::string>& endpoints, const st
             logger->info("Session ID: {}", testClient.get_session_id());
             logger->info("Leader Member: {}", testClient.get_leader_member_id());
 
+            testClient.stop_polling();  // ensure we control polling during the test
             // Disconnect cleanly
             testClient.disconnect();
             return true;
@@ -334,6 +335,7 @@ int main(int argc, char* argv[]) {
             logger->error("Failed to connect to cluster for order processing");
             return 1;
         }
+        client.stop_polling();  // switch to manual polling strategy
 
         logger->info("Successfully connected to cluster!");
         logger->info("Session ID: {}", client.get_session_id());
@@ -394,6 +396,7 @@ int main(int argc, char* argv[]) {
                     logger->info("Reconnection attempt {}...", reconnectAttempts + 1);
                     if (client.connect()) {
                         logger->info("Reconnected successfully!");
+                        client.stop_polling();
                         isReconnecting = false;
                         reconnectAttempts = 0;
                         currentReconnectDelay = reconnectDelay; // Reset delay for next time

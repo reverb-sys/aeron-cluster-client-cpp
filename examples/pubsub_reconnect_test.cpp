@@ -19,6 +19,7 @@
 #include <json/json.h>
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 
 using namespace aeron_cluster;
 
@@ -43,6 +44,7 @@ constexpr int DUPLICATE_DELIVERY_RECONNECT_THRESHOLD = 5;
 std::atomic<bool> duplicate_reconnect_requested{false};
 
 constexpr auto INACTIVITY_TIMEOUT = std::chrono::seconds(30);
+constexpr auto ZERO_INTERVAL_IDLE = std::chrono::microseconds(250);
 std::atomic<long long> last_message_timestamp_ns{0};
 
 long long steady_clock_now_ns() {
@@ -331,8 +333,12 @@ void printLatencyReport() {
         }
         double average = static_cast<double>(sum) / static_cast<double>(latencies_ms.size());
 
-        logger->info("Latency percentiles (ms): avg={:.2f} p75={} p80={} p90={} p95={} p99={} p99.9={} p99.99={}",
-            average,
+        std::ostringstream avg_stream;
+        avg_stream << std::fixed << std::setprecision(2) << average;
+        const std::string avg_str = avg_stream.str();
+
+        logger->info("Latency percentiles (ms): avg={} p75={} p80={} p90={} p95={} p99={} p99.9={} p99.99={}",
+            avg_str,
             percentile(75.0),
             percentile(80.0),
             percentile(90.0),
@@ -428,6 +434,7 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
             pub_logger->error("Failed to connect publisher to cluster");
             return;
         }
+        publisher->stop_polling();  // use manual polling in this thread
         
         pub_logger->info("Publisher connected successfully!");
         pub_logger->info("Session ID: {}", publisher->get_session_id());
@@ -505,7 +512,11 @@ void publisherThread(const ClusterClientConfig& config, int messageCount, int in
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+                    if (intervalMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+                    } else {
+                        std::this_thread::sleep_for(ZERO_INTERVAL_IDLE);
+                    }
                 }
                 
                 // Poll for any responses
@@ -712,6 +723,8 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
         });
         
         auto last_pending_status_log = std::chrono::steady_clock::time_point{};
+        auto last_pending_change = std::chrono::steady_clock::now();
+        long long last_pending_value = 0;
 
         // Set up connection state callback to detect session closures
         bool session_closed_by_cluster = false;
@@ -746,6 +759,7 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
+            subscriber->stop_polling();  // manual polling loop handles fragments
             
             sub_logger->info("Subscriber connected successfully!");
             
@@ -869,6 +883,10 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - publisher_finish_time).count();
                     auto pending = pending_message_count();
+                    if (pending != last_pending_value) {
+                        last_pending_value = pending;
+                        last_pending_change = now;
+                    }
                     
                     if (pending == 0) {
                         if (elapsed >= timeoutMs) {
@@ -878,6 +896,13 @@ void subscriberThread(const ClusterClientConfig& config, int disconnectAt, int r
                             break;
                         }
                     } else if (elapsed >= timeoutMs) {
+                        const auto stagnant = now - last_pending_change;
+                        if (stagnant >= std::chrono::milliseconds(timeoutMs)) {
+                            sub_logger->warn("Publisher finished {}ms ago but backlog of {} messages has not moved for {}ms; forcing reconnect to drain.", elapsed, pending, std::chrono::duration_cast<std::chrono::milliseconds>(stagnant).count());
+                            subscriber->disconnect();
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                            break;
+                        }
                         if (last_pending_status_log.time_since_epoch().count() == 0 ||
                             (now - last_pending_status_log) >= std::chrono::seconds(5)) {
                             sub_logger->info("Publisher finished {}ms ago but {} messages still pending; continuing to wait for delivery.", elapsed, pending);
@@ -1050,7 +1075,11 @@ void multiIdentifierPublisherThread(const ClusterClientConfig& config, int messa
                 
                 // Wait between messages
                 if (i < messageCount - 1 && running) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+                    if (intervalMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
+                    } else {
+                        std::this_thread::sleep_for(ZERO_INTERVAL_IDLE);
+                    }
                 }
                 
                 // Poll for any responses
@@ -1579,6 +1608,12 @@ int main(int argc, char* argv[]) {
         pub_config.enable_console_info = true;
         pub_config.enable_console_warnings = true;
         pub_config.enable_console_errors = true;
+        pub_config.publish_max_retry_attempts = std::max(pub_config.publish_max_retry_attempts, 200);
+        pub_config.publish_retry_idle_base = std::chrono::microseconds(500);
+        pub_config.publish_retry_idle_max = std::chrono::milliseconds(5);
+        if (messageInterval <= 0) {
+            pub_config.publish_rate_limit_delay = ZERO_INTERVAL_IDLE;
+        }
         
         auto sub_config = ClusterClientConfigBuilder()
                             .with_cluster_endpoints(clusterEndpoints)

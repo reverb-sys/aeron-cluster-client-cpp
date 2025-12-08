@@ -445,6 +445,10 @@ public:
     ClusterClientConfigBuilder& with_application_name(const std::string& name);
     ClusterClientConfigBuilder& with_default_topic(const std::string& topic);
     ClusterClientConfigBuilder& with_client_id(const std::string& client_id);
+    ClusterClientConfigBuilder& with_publish_retry_attempts(int attempts);
+    ClusterClientConfigBuilder& with_publish_retry_backoff(std::chrono::microseconds base_delay,
+                                                          std::chrono::microseconds max_delay);
+    ClusterClientConfigBuilder& with_publish_rate_limit_delay(std::chrono::microseconds delay);
 
     /**
      * @brief Build the configuration
