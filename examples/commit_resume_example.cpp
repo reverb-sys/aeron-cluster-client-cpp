@@ -39,6 +39,7 @@ int main() {
         return 1;
     }
     std::cout << "Connected successfully!" << std::endl;
+    client.stop_polling();
 
     // Subscribe to a topic
     std::string topic = "orders";
@@ -47,9 +48,6 @@ int main() {
         std::cerr << "Failed to subscribe to topic" << std::endl;
         return 1;
     }
-
-    // Start polling for messages
-    client.start_polling();
 
     // Simulate receiving some messages
     std::cout << "Polling for messages for 10 seconds..." << std::endl;
@@ -115,7 +113,6 @@ int main() {
 
     // Clean up
     std::cout << "\nDisconnecting..." << std::endl;
-    client.stop_polling();
     client.disconnect();
     std::cout << "Disconnected successfully" << std::endl;
 

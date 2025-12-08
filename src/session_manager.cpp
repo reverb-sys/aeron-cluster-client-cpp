@@ -3,6 +3,7 @@
 #include <Aeron.h>
 #include <json/json.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -415,21 +416,32 @@ class SessionManager::Impl {
                 reinterpret_cast<std::uint8_t*>(const_cast<std::uint8_t*>(encoded_message.data())),
                 static_cast<aeron::util::index_t>(encoded_message.size()));
 
-            std::int64_t result = ingress_publication_->offer(buffer, 0, encoded_message.size());
+            const int max_attempts = effective_publish_retry_attempts();
+            for (int attempt = 0; attempt < max_attempts; ++attempt) {
+                std::int64_t result =
+                    ingress_publication_->offer(buffer, 0, encoded_message.size());
 
-            if (result > 0) {
-                clear_last_publication_error();
-                stats_.messages_sent++;
-                stats_.last_message_time = std::chrono::steady_clock::now();
+                if (result > 0) {
+                    clear_last_publication_error();
+                    stats_.messages_sent++;
+                    stats_.last_message_time = std::chrono::steady_clock::now();
 
-                if (config_.debug_logging) {
-                    std::cout << config_.logging.log_prefix
-                              << " Message sent successfully, position: " << result << std::endl;
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix
+                                  << " Message sent successfully, position: " << result << std::endl;
+                    }
+
+                    apply_publish_rate_limit();
+                    return true;
                 }
-                return true;
-            }
 
-            handle_offer_failure("Raw message offer", result);
+                OfferFailureCode failure_code = handle_offer_failure("Raw message offer", result);
+                if (!is_transient_failure(failure_code) || attempt == max_attempts - 1) {
+                    return false;
+                }
+
+                wait_before_publish_retry(attempt);
+            }
             return false;
 
         } catch (const std::exception& e) {
@@ -529,10 +541,24 @@ class SessionManager::Impl {
         }
 
         if (session_event_callback_) {
-            std::cout << config_.logging.log_prefix
-                      << " Invoking session event callback for event code: " << result.event_code
-                      << std::endl;
-            session_event_callback_(result);
+            if (config_.debug_logging) {
+                std::cout << config_.logging.log_prefix
+                          << " Invoking session event callback for event code: " << result.event_code
+                          << std::endl;
+            }
+            try {
+                session_event_callback_(result);
+            } catch (const std::exception& e) {
+                if (config_.enable_console_errors) {
+                    std::cerr << config_.logging.log_prefix
+                              << " Session event callback error: " << e.what() << std::endl;
+                }
+            } catch (...) {
+                if (config_.enable_console_errors) {
+                    std::cerr << config_.logging.log_prefix
+                              << " Session event callback threw unknown exception" << std::endl;
+                }
+            }
         }
     }
 
@@ -667,6 +693,39 @@ class SessionManager::Impl {
         }
 
         return code;
+    }
+
+    int effective_publish_retry_attempts() const {
+        return std::max(1, config_.publish_max_retry_attempts);
+    }
+
+    void wait_before_publish_retry(int attempt) const {
+        if (config_.publish_retry_idle_base.count() <= 0 &&
+            config_.publish_retry_idle_max.count() <= 0) {
+            std::this_thread::yield();
+            return;
+        }
+
+        auto base = config_.publish_retry_idle_base.count() > 0
+                        ? config_.publish_retry_idle_base
+                        : std::chrono::microseconds(100);
+        auto delay = base * (attempt + 1);
+        if (config_.publish_retry_idle_max.count() > 0 &&
+            delay > config_.publish_retry_idle_max) {
+            delay = config_.publish_retry_idle_max;
+        }
+
+        if (delay.count() > 0) {
+            std::this_thread::sleep_for(delay);
+        } else {
+            std::this_thread::yield();
+        }
+    }
+
+    void apply_publish_rate_limit() const {
+        if (config_.publish_rate_limit_delay.count() > 0) {
+            std::this_thread::sleep_for(config_.publish_rate_limit_delay);
+        }
     }
 
     ClusterClientConfig config_;
@@ -1116,23 +1175,34 @@ class SessionManager::Impl {
 
             // Send the message
             aeron::AtomicBuffer buffer(combined_buffer.data(), combined_buffer.size());
-            std::int64_t result = ingress_publication_->offer(
-                buffer, 0, static_cast<aeron::util::index_t>(combined_buffer.size()));
+            const int max_attempts = effective_publish_retry_attempts();
+            for (int attempt = 0; attempt < max_attempts; ++attempt) {
+                std::int64_t result = ingress_publication_->offer(
+                    buffer, 0, static_cast<aeron::util::index_t>(combined_buffer.size()));
 
-            if (result > 0) {
-                clear_last_publication_error();
-                stats_.messages_sent++;
-                stats_.last_message_time = std::chrono::steady_clock::now();
+                if (result > 0) {
+                    clear_last_publication_error();
+                    stats_.messages_sent++;
+                    stats_.last_message_time = std::chrono::steady_clock::now();
 
-                if (config_.debug_logging) {
-                    std::cout << config_.logging.log_prefix
-                              << " Combined message sent successfully, position: " << result
-                              << std::endl;
+                    if (config_.debug_logging) {
+                        std::cout << config_.logging.log_prefix
+                                  << " Combined message sent successfully, position: " << result
+                                  << std::endl;
+                    }
+
+                    apply_publish_rate_limit();
+                    return true;
                 }
-                return true;
-            }
 
-            handle_offer_failure("Combined message offer", result);
+                OfferFailureCode failure_code =
+                    handle_offer_failure("Combined message offer", result);
+                if (!is_transient_failure(failure_code) || attempt == max_attempts - 1) {
+                    return false;
+                }
+
+                wait_before_publish_retry(attempt);
+            }
             return false;
 
         } catch (const std::exception& e) {

@@ -166,6 +166,7 @@ class AdvancedClientDemo {
                 std::cerr << "❌ Failed to connect to cluster" << std::endl;
                 return;
             }
+            client.stop_polling();
 
             std::cout << "✅ Connected with advanced features!" << std::endl;
             std::cout << std::endl;

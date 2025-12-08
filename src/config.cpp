@@ -50,6 +50,23 @@ void ClusterClientConfig::validate() {
         throw std::invalid_argument("Keepalive interval must be positive");
     }
 
+    if (publish_max_retry_attempts < 1) {
+        throw std::invalid_argument("Publish max retry attempts must be at least 1");
+    }
+
+    if (publish_retry_idle_base.count() < 0) {
+        throw std::invalid_argument("Publish retry idle base cannot be negative");
+    }
+
+    if (publish_retry_idle_max.count() < 0) {
+        throw std::invalid_argument("Publish retry idle max cannot be negative");
+    }
+
+    if (publish_retry_idle_max.count() > 0 &&
+        publish_retry_idle_base.count() > publish_retry_idle_max.count()) {
+        throw std::invalid_argument("Publish retry idle max must be >= base delay");
+    }
+
     if (delivery_stall_warning_timeout.count() < 0 ||
         delivery_stall_disconnect_timeout.count() < 0) {
         throw std::invalid_argument("Delivery stall timeouts cannot be negative");

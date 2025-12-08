@@ -56,6 +56,12 @@ struct ClusterClientConfig {
     std::chrono::milliseconds keepalive_interval{1000};
     int keepalive_max_retries = 3;
     
+    // Publish offer retry/backoff behavior
+    int publish_max_retry_attempts = 50;
+    std::chrono::microseconds publish_retry_idle_base{500};   // 0.5 ms baseline
+    std::chrono::microseconds publish_retry_idle_max{5000};   // clamp at 5 ms
+    std::chrono::microseconds publish_rate_limit_delay{0};    // optional global throttle
+    
     // Logging
     LoggingConfig logging;
     bool debug_logging = false;

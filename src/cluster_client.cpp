@@ -2194,6 +2194,24 @@ ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_client_id(
     return *this;
 }
 
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_publish_retry_attempts(int attempts) {
+    config_.publish_max_retry_attempts = attempts;
+    return *this;
+}
+
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_publish_retry_backoff(
+    std::chrono::microseconds base_delay, std::chrono::microseconds max_delay) {
+    config_.publish_retry_idle_base = base_delay;
+    config_.publish_retry_idle_max = max_delay;
+    return *this;
+}
+
+ClusterClientConfigBuilder& ClusterClientConfigBuilder::with_publish_rate_limit_delay(
+    std::chrono::microseconds delay) {
+    config_.publish_rate_limit_delay = delay;
+    return *this;
+}
+
 ClusterClientConfig ClusterClientConfigBuilder::build() const {
     // Validate the configuration before returning
     ClusterClientConfig config = config_;

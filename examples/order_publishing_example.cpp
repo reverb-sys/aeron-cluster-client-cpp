@@ -149,6 +149,9 @@ int main(int argc, char* argv[]) {
         std::cout << "   Leader Member: " << client.get_leader_member_id() << std::endl;
         std::cout << std::endl;
 
+        // Use manual polling strategy
+        client.stop_polling();
+
         // Publish some example orders
         std::cout << "📤 Publishing example orders..." << std::endl;
 
